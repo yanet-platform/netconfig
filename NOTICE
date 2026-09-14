@@ -1,0 +1,10 @@
+Netconfig
+Copyright 2026 YANDEX LLC
+
+This product includes interface configuration code from YANET2,
+Copyright 2023 YANDEX LLC, licensed under the Apache License, Version 2.0.
+
+Original source: https://github.com/yanet-platform/yanet2/pull/2628
+Source revision: c3a6edaf70c6ccbe0c2b0082701c66ab4bd61a4f
+
+The extracted implementation is maintained independently in this repository.

@@ -1,0 +1,29 @@
+# Copyright 2026 YANDEX LLC
+# SPDX-License-Identifier: Apache-2.0
+
+source: native
+retry:
+  initial_backoff: 250ms
+  max_backoff: 30s
+native:
+  ethernets:
+    kni0:
+      mtu: 9000
+      dhcp4: false
+      dhcp6: false
+      accept-ra: false
+      link-local: []
+    lo:
+      addresses: [192.0.2.241/32, '2001:db8::f1/128']
+  vlans:
+    kni0.100:
+      id: 100
+      link: kni0
+      mtu: 9000
+      addresses: [192.0.2.2/24, '2001:db8:100::2/64', 'fe80::f1/64']
+      accept-ra: false
+      link-local: []
+  dummy-devices:
+    dummy0:
+      addresses: [198.51.100.1/32]
+      link-local: []

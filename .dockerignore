@@ -1,0 +1,7 @@
+.git
+.github
+build
+*.test
+*.out
+go.work
+go.work.sum
