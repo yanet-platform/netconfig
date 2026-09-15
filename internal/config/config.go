@@ -15,15 +15,13 @@ import (
 
 	"github.com/yanet-platform/netconfig/internal/bootstrap"
 	"github.com/yanet-platform/netconfig/internal/desired"
-	"github.com/yanet-platform/netconfig/internal/native"
-	"github.com/yanet-platform/netconfig/internal/netplan"
 )
 
 // Config selects exactly one interface source and the bootstrap retry policy.
 type Config struct {
 	Source      string           `yaml:"source"`
 	NetplanPath string           `yaml:"netplan_path"`
-	Native      *native.Config   `yaml:"native"`
+	Native      yaml.Node        `yaml:"native"`
 	Retry       bootstrap.Config `yaml:"retry"`
 }
 
@@ -47,7 +45,7 @@ func Parse(data []byte) (*Config, error) {
 	if config == nil || config.Source != "native" && config.Source != "netplan" {
 		return nil, errors.New("source must be netplan or native")
 	}
-	if config.Source == "native" && config.Native == nil {
+	if config.Source == "native" && config.Native.Kind != yaml.MappingNode {
 		return nil, errors.New("source: native requires native configuration")
 	}
 	if config.Retry.InitialBackoff <= 0 || config.Retry.MaxBackoff < config.Retry.InitialBackoff {
@@ -89,11 +87,38 @@ func ParseFile(path string) (*Config, error) {
 // Load normalizes the selected source once, before bootstrap acquires resources.
 func (m *Config) Load() (desired.State, error) {
 	if m.Source == "native" {
-		return m.Native.Load()
+		if err := validateNative(&m.Native); err != nil {
+			return desired.State{}, err
+		}
+		fields, err := mapping(m.Native)
+		if err != nil {
+			return desired.State{}, err
+		}
+		return parseInterfaces(fields, true)
 	}
 	path := m.NetplanPath
 	if path == "" {
 		path = "/etc/netplan/00-interfaces.yaml"
 	}
-	return netplan.ParseFile(path)
+	return ParseNetplanFile(path)
+}
+
+// Reject aliases, merge keys and non-string keys before map decoding can coerce
+// them. Duplicate keys are rejected by the YAML decoder at each mapping level.
+func validateNative(node *yaml.Node) error {
+	if node.Kind == yaml.MappingNode && node.Tag != "!!map" || node.Kind == yaml.SequenceNode && node.Tag != "!!seq" {
+		return errors.New("native collections must use standard YAML types")
+	}
+	if node.Kind == yaml.AliasNode {
+		return errors.New("native YAML aliases are not supported")
+	}
+	for i, child := range node.Content {
+		if node.Kind == yaml.MappingNode && i%2 == 0 && child.Tag != "!!str" {
+			return errors.New("native mapping keys must be strings")
+		}
+		if err := validateNative(child); err != nil {
+			return err
+		}
+	}
+	return nil
 }

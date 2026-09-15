@@ -1,7 +1,7 @@
 // Copyright 2026 YANDEX LLC
 // SPDX-License-Identifier: Apache-2.0
 
-package netplan
+package config
 
 import (
 	"bytes"
@@ -23,8 +23,8 @@ import (
 
 var decimalDigits = regexp.MustCompile(`^[0-9]+$`)
 
-// Parse reads the managed interface subset of a single Netplan document.
-func Parse(data []byte) (desired.State, error) {
+// ParseNetplan reads the managed subset, allowing unrelated host configuration.
+func ParseNetplan(data []byte) (desired.State, error) {
 	var root map[string]yaml.Node
 	decoder := yaml.NewDecoder(bytes.NewReader(data))
 	if err := decoder.Decode(&root); err != nil {
@@ -45,72 +45,72 @@ func Parse(data []byte) (desired.State, error) {
 	if version.Kind != yaml.ScalarNode || version.Tag != "!!int" || version.Value != "2" {
 		return desired.State{}, errors.New("network.version must be 2")
 	}
+	return parseInterfaces(network, false)
+}
+
+// Both sources normalize directly into desired state. Strict native input has
+// no host sections, scalar coercion, YAML aliases or ignored routing fields.
+func parseInterfaces(network map[string]yaml.Node, strict bool) (desired.State, error) {
+	sections := map[string]map[string]yaml.Node{}
 	for _, name := range slices.Sorted(maps.Keys(network)) {
 		switch name {
-		case "version", "renderer", "ethernets", "vlans", "dummy-devices",
-			"wifis", "modems", "bridges", "bonds", "tunnels", "vrfs",
-			"nm-devices", "virtual-ethernets", "openvswitch":
-		default:
-			return desired.State{}, fmt.Errorf("network: unsupported setting %q", name)
-		}
-	}
-	sections := map[string]map[string]yaml.Node{}
-	for _, name := range []string{"ethernets", "vlans", "dummy-devices"} {
-		if node, present := network[name]; present {
-			section, err := mapping(node)
+		case "ethernets", "vlans", "dummy-devices":
+			section, err := mapping(network[name])
 			if err != nil {
 				return desired.State{}, fmt.Errorf("network.%s: %w", name, err)
 			}
 			sections[name] = section
+		case "version", "renderer", "wifis", "modems", "bridges", "bonds", "tunnels", "vrfs",
+			"nm-devices", "virtual-ethernets", "openvswitch":
+			if !strict {
+				continue
+			}
+			fallthrough
+		default:
+			return desired.State{}, fmt.Errorf("unsupported section %q", name)
 		}
 	}
 
 	state := desired.State{}
-	for _, name := range slices.Sorted(maps.Keys(sections["ethernets"])) {
-		node := sections["ethernets"][name]
-		kind := desired.LinkKindKNI
-		if name == "lo" {
-			kind = desired.LinkKindLoopback
-		} else if !desired.IsKNIName(name) {
-			continue
+	for _, section := range []struct {
+		name string
+		kind desired.LinkKind
+	}{
+		{"ethernets", desired.LinkKindKNI}, {"vlans", desired.LinkKindVLAN}, {"dummy-devices", desired.LinkKindDummy},
+	} {
+		kind := section.kind
+		for _, name := range slices.Sorted(maps.Keys(sections[section.name])) {
+			linkKind := kind
+			if kind == desired.LinkKindKNI {
+				if name == "lo" {
+					linkKind = desired.LinkKindLoopback
+				} else if !strict && !desired.IsKNIName(name) {
+					continue
+				}
+			}
+			fields, err := mapping(sections[section.name][name])
+			if err != nil {
+				return desired.State{}, fmt.Errorf("link %q: %w", name, err)
+			}
+			parent := scalar(fields["link"])
+			if kind == desired.LinkKindVLAN {
+				if parent.Tag != "!!str" || parent.Value == "" {
+					return desired.State{}, fmt.Errorf("vlan %q: parent link is required", name)
+				}
+				if _, declared := sections["ethernets"][parent.Value]; !declared || parent.Value == "lo" {
+					return desired.State{}, fmt.Errorf("vlan %q: parent is not a declared Ethernet", name)
+				}
+				if !strict && !desired.IsKNIName(parent.Value) {
+					continue
+				}
+			}
+			link, err := parseLink(name, linkKind, fields, strict)
+			if err != nil {
+				return desired.State{}, err
+			}
+			link.Parent = parent.Value
+			state.Links = append(state.Links, link)
 		}
-		link, err := parseLink(name, kind, node)
-		if err != nil {
-			return desired.State{}, err
-		}
-		state.Links = append(state.Links, link)
-	}
-	for _, name := range slices.Sorted(maps.Keys(sections["dummy-devices"])) {
-		node := sections["dummy-devices"][name]
-		link, err := parseLink(name, desired.LinkKindDummy, node)
-		if err != nil {
-			return desired.State{}, err
-		}
-		state.Links = append(state.Links, link)
-	}
-	for _, name := range slices.Sorted(maps.Keys(sections["vlans"])) {
-		node := sections["vlans"][name]
-		fields, err := mapping(node)
-		if err != nil {
-			return desired.State{}, fmt.Errorf("vlan %q: %w", name, err)
-		}
-		parentNode := scalar(fields["link"])
-		if parentNode.Kind != yaml.ScalarNode || parentNode.Tag != "!!str" || parentNode.Value == "" {
-			return desired.State{}, fmt.Errorf("vlan %q: parent link is required", name)
-		}
-		parent := parentNode.Value
-		if _, declared := sections["ethernets"][parent]; !declared || parent == "lo" {
-			return desired.State{}, fmt.Errorf("vlan %q: parent %q is not a declared Ethernet", name, parent)
-		}
-		if !desired.IsKNIName(parent) {
-			continue
-		}
-		link, err := parseLink(name, desired.LinkKindVLAN, node)
-		if err != nil {
-			return desired.State{}, err
-		}
-		link.Parent = parent
-		state.Links = append(state.Links, link)
 	}
 	sort.Slice(state.Links, func(first, second int) bool {
 		return state.Links[first].Name < state.Links[second].Name
@@ -121,13 +121,13 @@ func Parse(data []byte) (desired.State, error) {
 	return state, nil
 }
 
-// ParseFile reads and validates the startup Netplan file.
-func ParseFile(path string) (desired.State, error) {
+// ParseNetplanFile reads and validates the startup Netplan file.
+func ParseNetplanFile(path string) (desired.State, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return desired.State{}, fmt.Errorf("read netplan file %q: %w", path, err)
 	}
-	state, err := Parse(data)
+	state, err := ParseNetplan(data)
 	if err != nil {
 		return desired.State{}, fmt.Errorf("parse netplan file %q: %w", path, err)
 	}
@@ -153,16 +153,15 @@ func scalar(node yaml.Node) yaml.Node {
 	return node
 }
 
-func parseLink(name string, kind desired.LinkKind, node yaml.Node) (desired.Link, error) {
-	fields, err := mapping(node)
-	if err != nil {
-		return desired.Link{}, fmt.Errorf("link %q: %w", name, err)
-	}
+func parseLink(name string, kind desired.LinkKind, fields map[string]yaml.Node, strict bool) (desired.Link, error) {
 	link := desired.Link{Name: name, Kind: kind, IPv6LinkLocal: true}
 	for _, key := range slices.Sorted(maps.Keys(fields)) {
 		value := scalar(fields[key])
 		switch key {
 		case "routes", "routing-policy":
+			if strict {
+				return desired.Link{}, fmt.Errorf("link %q: unsupported setting %q", name, key)
+			}
 			continue
 		case "addresses", "link-local":
 			if value.Kind != yaml.SequenceNode {
@@ -177,6 +176,9 @@ func parseLink(name string, kind desired.LinkKind, node yaml.Node) (desired.Link
 				values = append(values, itemValue.Value)
 			}
 			if key == "link-local" {
+				if strict && len(values) > 1 {
+					return desired.Link{}, errors.New("link-local must be [] or [ipv6]")
+				}
 				for _, family := range values {
 					if family != "ipv6" {
 						return desired.Link{}, fmt.Errorf("link %q: unsupported link-local family %q", name, family)
@@ -194,7 +196,7 @@ func parseLink(name string, kind desired.LinkKind, node yaml.Node) (desired.Link
 			}
 		case "dhcp4", "dhcp6", "accept-ra":
 			var enabled bool
-			if value.Kind != yaml.ScalarNode || value.Tag == "!!null" || key != "accept-ra" && value.Tag != "!!bool" {
+			if value.Kind != yaml.ScalarNode || value.Tag == "!!null" || (strict || key != "accept-ra") && value.Tag != "!!bool" {
 				return desired.Link{}, fmt.Errorf("link %q: %s must be a boolean", name, key)
 			}
 			if err := value.Decode(&enabled); err != nil {
@@ -206,7 +208,7 @@ func parseLink(name string, kind desired.LinkKind, node yaml.Node) (desired.Link
 				return desired.Link{}, fmt.Errorf("link %q: %s must be disabled", name, key)
 			}
 		case "mtu":
-			if value.Kind != yaml.ScalarNode || !decimalDigits.MatchString(value.Value) {
+			if value.Kind != yaml.ScalarNode || strict && value.Tag != "!!int" || !decimalDigits.MatchString(value.Value) {
 				return desired.Link{}, fmt.Errorf("link %q: mtu must be a decimal integer", name)
 			}
 			mtu, err := strconv.ParseUint(value.Value, 10, 31)
@@ -224,7 +226,7 @@ func parseLink(name string, kind desired.LinkKind, node yaml.Node) (desired.Link
 	}
 	if kind == desired.LinkKindVLAN {
 		value := scalar(fields["id"])
-		if value.Kind != yaml.ScalarNode || value.Tag == "!!null" || !decimalDigits.MatchString(value.Value) {
+		if value.Kind != yaml.ScalarNode || value.Tag == "!!null" || strict && value.Tag != "!!int" || !decimalDigits.MatchString(value.Value) {
 			return desired.Link{}, fmt.Errorf("vlan %q: id must be decimal digits in 0..4094", name)
 		}
 		identifier, err := strconv.ParseUint(value.Value, 10, 16)

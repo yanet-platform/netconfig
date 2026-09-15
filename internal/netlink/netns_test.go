@@ -20,6 +20,19 @@ import (
 	netreconcile "github.com/yanet-platform/netconfig/internal/netlink"
 )
 
+// Keep successful kernel writes real; inject just one failed address operation.
+type addressFailure struct {
+	*vnetlink.Handle
+	fail bool
+}
+
+func (m *addressFailure) AddrReplace(link vnetlink.Link, address *vnetlink.Addr) error {
+	if m.fail && address.IP.IsLinkLocalUnicast() {
+		return rejected
+	}
+	return m.Handle.AddrReplace(link, address)
+}
+
 // Kernel cacheinfo, unlike a prefix-only fake, distinguishes static addresses
 // from expiring/deprecated ones. Only explicitly desired addresses are promoted.
 func Test_Reconciler_NetnsStaticLifetimes(t *testing.T) {
@@ -202,12 +215,15 @@ func Test_Reconciler_Netns(t *testing.T) {
 		}
 	})
 	state := desired.State{Links: []desired.Link{
-		{Name: "kni9", MTU: 1500, Addresses: []netip.Prefix{netip.MustParsePrefix("fe80::f1/64")}},
+		{Name: "kni9", MTU: 1500, Addresses: []netip.Prefix{
+			netip.MustParsePrefix("192.0.2.9/24"), netip.MustParsePrefix("fe80::f1/64"),
+		}},
 		{Name: "vlan9", Kind: desired.LinkKindVLAN, Parent: "kni9", VLANID: 100},
 		{Name: "lo", Kind: desired.LinkKindLoopback, MTU: 9000},
 		{Name: "dummy9", Kind: desired.LinkKindDummy, MTU: 9000},
 	}}
-	reconciler := netreconcile.NewReconciler(handle, netreconcile.ProcSysctl{})
+	backend := &addressFailure{Handle: handle, fail: true}
+	reconciler := netreconcile.NewReconciler(backend, netreconcile.ProcSysctl{})
 	require.Error(t, reconciler.Create(t.Context(), state))
 	require.Error(t, reconciler.Configure(t.Context(), state))
 	for _, name := range []string{"lo", "dummy9"} {
@@ -217,6 +233,12 @@ func Test_Reconciler_Netns(t *testing.T) {
 	}
 	parent := newKernelTAP(t, handle, "kni9", 9000)
 	require.NoError(t, reconciler.Create(t.Context(), state))
+	require.ErrorIs(t, reconciler.Configure(t.Context(), state), rejected)
+	partial, err := handle.AddrList(parent, vnetlink.FAMILY_V4)
+	require.NoError(t, err)
+	require.Len(t, partial, 1)
+	require.Equal(t, "192.0.2.9/24", partial[0].IPNet.String())
+	backend.fail = false
 	require.Eventually(t, func() bool { return reconciler.Configure(t.Context(), state) == nil }, 5*time.Second, 20*time.Millisecond)
 	for name, mtu := range map[string]int{"kni9": 1500, "vlan9": 1500, "lo": 9000, "dummy9": 9000} {
 		link, err := handle.LinkByName(name)

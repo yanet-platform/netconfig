@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -84,7 +85,11 @@ func Test_Config_InvalidAddresses(t *testing.T) {
 
 func parseSource(t *testing.T, source, body string) (*config.Config, error) {
 	t.Helper()
-	input := "source: native\nnative: {" + body + "}"
+	nativeBody := body
+	if !strings.Contains(body, "\n") && strings.Contains(body, ":") {
+		nativeBody = "{" + body + "}"
+	}
+	input := "source: native\nnative:\n  " + strings.ReplaceAll(strings.TrimSpace(nativeBody), "\n", "\n  ")
 	if source == "netplan" {
 		path := filepath.Join(t.TempDir(), "netplan.yaml")
 		require.NoError(t, os.WriteFile(path, []byte("network: {version: 2, "+body+"}"), 0o600))
@@ -93,37 +98,30 @@ func parseSource(t *testing.T, source, body string) (*config.Config, error) {
 	return config.Parse([]byte(input))
 }
 
-// Exercise the full DHCP grammar once per adapter, and false/true wiring for
-// other managed kinds. RA acceptance must not implicitly enable DHCP.
+func loadSource(t *testing.T, source, body string) (desired.State, error) {
+	t.Helper()
+	parsed, err := parseSource(t, source, body)
+	if err != nil {
+		return desired.State{}, err
+	}
+	return parsed.Load()
+}
+
+// All link kinds use the same field parser. Exercise DHCP grammar per source;
+// RA acceptance must not implicitly enable DHCP.
 func Test_Config_DisabledDHCP(t *testing.T) {
 	for _, source := range []string{"native", "netplan"} {
-		for kind, topology := range []string{
-			"ethernets: {kni0: {%s}}", "ethernets: {lo: {%s}}",
-			"ethernets: {kni0: {}}, vlans: {v0: {id: 0, link: kni0, %s}}",
-			"dummy-devices: {dummy0: {%s}}",
-		} {
-			values := []string{"false", "true"}
-			if kind == 0 {
-				values = append(values, "null", "'false'", "no", "0", "[]")
-			}
-			for _, field := range []string{"dhcp4", "dhcp6"} {
-				for _, value := range values {
-					t.Run(source+"/"+topology+"/"+field+"/"+value, func(t *testing.T) {
-						parsed, err := parseSource(t, source, fmt.Sprintf(topology, field+": "+value+", accept-ra: true"))
-						var state desired.State
-						if err == nil {
-							state, err = parsed.Load()
-						}
-						if value == "false" {
-							require.NoError(t, err)
-							require.NotEmpty(t, state.Links)
-							require.NotNil(t, state.Links[len(state.Links)-1].AcceptRA)
-							require.True(t, *state.Links[len(state.Links)-1].AcceptRA)
-						} else {
-							require.ErrorContains(t, err, field)
-						}
-					})
-				}
+		for _, field := range []string{"dhcp4", "dhcp6"} {
+			for _, value := range []string{"false", "true", "null", "'false'", "no", "0", "[]"} {
+				t.Run(source+"/"+field+"/"+value, func(t *testing.T) {
+					state, err := loadSource(t, source, "ethernets: {kni0: {"+field+": "+value+", accept-ra: true}}")
+					if value == "false" {
+						require.NoError(t, err)
+						require.Equal(t, new(true), state.Links[0].AcceptRA)
+					} else {
+						require.ErrorContains(t, err, field)
+					}
+				})
 			}
 		}
 	}

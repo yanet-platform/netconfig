@@ -1,7 +1,7 @@
 // Copyright 2026 YANDEX LLC
 // SPDX-License-Identifier: Apache-2.0
 
-package netplan_test
+package config_test
 
 import (
 	"fmt"
@@ -10,14 +10,14 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/yanet-platform/netconfig/internal/config"
 	"github.com/yanet-platform/netconfig/internal/desired"
-	"github.com/yanet-platform/netconfig/internal/netplan"
 )
 
 // Test_Parse_DataplaneFixture verifies that only the two KNI, eight VLANs and
 // existing loopback are managed, including explicitly configured IPv6LL.
 func Test_Parse_DataplaneFixture(t *testing.T) {
-	state, err := netplan.ParseFile("testdata/dataplane.yaml")
+	state, err := config.ParseNetplanFile("testdata/dataplane.yaml")
 	require.NoError(t, err)
 	require.Len(t, state.Links, 11)
 	counts := map[desired.LinkKind]int{}
@@ -81,7 +81,7 @@ func Test_Parse_ManagedBoundary(t *testing.T) {
 		{name: "multiple documents", yaml: "network: {version: 2}\n---\nnetwork: {version: 2}"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			state, err := netplan.Parse([]byte(tc.yaml))
+			state, err := config.ParseNetplan([]byte(tc.yaml))
 			if tc.valid {
 				require.NoError(t, err)
 			} else {
@@ -105,7 +105,7 @@ func Test_Parse_DecimalMTU(t *testing.T) {
 		{name: "aliased network section", yaml: "defaults: &base {ethernets: {kni0: {mtu: 09000}}}\nnetwork: {<<: *base, version: 2}", mtu: 9000},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			state, err := netplan.Parse([]byte(tc.yaml))
+			state, err := config.ParseNetplan([]byte(tc.yaml))
 			require.NoError(t, err)
 			require.Len(t, state.Links, 1)
 			require.Equal(t, tc.mtu, state.Links[0].MTU)
@@ -126,7 +126,7 @@ func Test_Parse_LinkLocalGrammar(t *testing.T) {
 		{name: "explicit IPv6 generation", fields: "{link-local: [ipv6]}", enabled: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			state, err := netplan.Parse([]byte("network: {version: 2, ethernets: {kni0: " + tc.fields + "}}"))
+			state, err := config.ParseNetplan([]byte("network: {version: 2, ethernets: {kni0: " + tc.fields + "}}"))
 			require.NoError(t, err)
 			require.Equal(t, tc.enabled, state.Links[0].IPv6LinkLocal)
 		})
@@ -158,7 +158,7 @@ func Test_Parse_DecimalVLANGrammar(t *testing.T) {
 		{name: "fraction", field: "id: 10.0"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			state, err := netplan.Parse(fmt.Appendf(nil,
+			state, err := config.ParseNetplan(fmt.Appendf(nil,
 				"network:\n  version: 2\n  ethernets: {kni0: {}}\n  vlans:\n    v0:\n      link: kni0\n      %s\n",
 				tc.field,
 			))
@@ -175,7 +175,7 @@ func Test_Parse_DecimalVLANGrammar(t *testing.T) {
 // Test_Parse_HostRoutingAndLoopbacks verifies that unrelated interfaces and
 // routing fields do not affect the managed topology.
 func Test_Parse_HostRoutingAndLoopbacks(t *testing.T) {
-	state, err := netplan.Parse([]byte(`
+	state, err := config.ParseNetplan([]byte(`
 network:
   version: 2
   ethernets:

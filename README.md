@@ -131,6 +131,8 @@ Native input strictly rejects unknown sections/fields, duplicate keys, null
 values and incorrect YAML types. Numeric fields require unquoted decimal integers;
 avoid leading zeros. There are no routes, policy rules, bridges, bonds, tunnels,
 `renderer`, `version`, arbitrary Ethernet names or administrative-state fields.
+Both sources normalize directly into desired state through the shared field parser
+in `internal/config`; native restrictions and Netplan compatibility are explicit.
 
 The Netplan adapter reads a single version-2 document and preserves the extracted
 parser's compatibility rules, including aliases and decimal strings for MTU/VLAN

@@ -1,7 +1,7 @@
 // Copyright 2026 YANDEX LLC
 // SPDX-License-Identifier: Apache-2.0
 
-package native_test
+package config_test
 
 import (
 	"net/netip"
@@ -9,18 +9,14 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
-	"go.yaml.in/yaml/v3"
 
 	"github.com/yanet-platform/netconfig/internal/desired"
-	"github.com/yanet-platform/netconfig/internal/native"
 )
 
 func Test_Config_LoadFixture(t *testing.T) {
 	data, err := os.ReadFile("testdata/native.yaml")
 	require.NoError(t, err)
-	var config native.Config
-	require.NoError(t, yaml.Unmarshal(data, &config))
-	state, err := config.Load()
+	state, err := loadSource(t, "native", string(data))
 	require.NoError(t, err)
 	acceptRA := false
 	require.Equal(t, desired.State{Links: []desired.Link{
@@ -46,9 +42,7 @@ func Test_Config_LoadDefaults(t *testing.T) {
 		}}},
 	} {
 		t.Run(tc.data, func(t *testing.T) {
-			var config native.Config
-			require.NoError(t, yaml.Unmarshal([]byte(tc.data), &config))
-			state, err := config.Load()
+			state, err := loadSource(t, "native", tc.data)
 			require.NoError(t, err)
 			require.Equal(t, tc.want, state)
 		})
@@ -63,9 +57,7 @@ func Test_Config_LoadInvalidInput(t *testing.T) {
 		"ethernets: {kni0: {}}\nvlans: {shared0: {id: 0, link: kni0}}\ndummy-devices: {shared0: {}}",
 	} {
 		t.Run(data, func(t *testing.T) {
-			var config native.Config
-			require.NoError(t, yaml.Unmarshal([]byte(data), &config))
-			state, err := config.Load()
+			state, err := loadSource(t, "native", data)
 			require.Error(t, err)
 			require.Equal(t, desired.State{}, state)
 		})

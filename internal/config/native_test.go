@@ -1,16 +1,13 @@
 // Copyright 2026 YANDEX LLC
 // SPDX-License-Identifier: Apache-2.0
 
-package native_test
+package config_test
 
 import (
 	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/require"
-	"go.yaml.in/yaml/v3"
-
-	"github.com/yanet-platform/netconfig/internal/native"
 )
 
 // Test_Config_StrictSchema verifies that unsupported keys, shapes and scalar
@@ -32,6 +29,8 @@ func Test_Config_StrictSchema(t *testing.T) {
 		{name: "duplicate section", data: "ethernets: {}\nethernets: {}"},
 		{name: "duplicate link", data: "ethernets: {kni0: {}, kni0: {}}"},
 		{name: "duplicate field", data: "ethernets: {kni0: {mtu: 1500, mtu: 9000}}"},
+		{name: "custom map tag", data: "ethernets: !custom {kni0: {}}"},
+		{name: "alias", data: "ethernets: {kni0: &link {}, kni1: *link}"},
 		{name: "routes", data: "ethernets: {kni0: {routes: []}}"},
 		{name: "administrative state", data: "ethernets: {kni0: {up: true}}"},
 		{name: "non VLAN empty parent", data: "ethernets: {kni0: {link: ''}}"},
@@ -51,8 +50,8 @@ func Test_Config_StrictSchema(t *testing.T) {
 		{name: "string RA", data: "ethernets: {kni0: {accept-ra: 'false'}}"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			var config native.Config
-			require.Error(t, yaml.Unmarshal([]byte(tc.data), &config))
+			_, err := loadSource(t, "native", tc.data)
+			require.Error(t, err)
 		})
 	}
 	for _, tc := range []struct {
@@ -75,9 +74,10 @@ func Test_Config_StrictSchema(t *testing.T) {
 				defaults += "link: kni0, "
 			}
 			topology := "ethernets: {kni0: {}}\nvlans: {v0: {" + defaults + tc.field + ": %s}}"
-			var config native.Config
-			require.Error(t, yaml.Unmarshal(fmt.Appendf(nil, topology, "null"), &config))
-			require.NoError(t, yaml.Unmarshal(fmt.Appendf(nil, topology, tc.value), &config))
+			_, err := loadSource(t, "native", fmt.Sprintf(topology, "null"))
+			require.Error(t, err)
+			_, err = loadSource(t, "native", fmt.Sprintf(topology, tc.value))
+			require.NoError(t, err)
 		})
 	}
 }
