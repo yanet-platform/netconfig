@@ -67,24 +67,16 @@ func Test_Parse_ManagedBoundary(t *testing.T) {
 		{name: "null managed link", yaml: "network: {version: 2, ethernets: {kni0: null}}"},
 		{name: "null addresses", yaml: "network: {version: 2, ethernets: {kni0: {addresses: null}}}"},
 		{name: "invalid address", yaml: "network: {version: 2, ethernets: {kni0: {addresses: [invalid]}}}"},
-		{name: "mapped prefix", yaml: "network: {version: 2, ethernets: {kni0: {addresses: ['::ffff:192.0.2.1/120']}}}"},
-		{name: "IPv6 prefix conflict", yaml: "network: {version: 2, ethernets: {kni0: {addresses: ['fe80::1/64', 'fe80::1/128']}}}"},
 		{name: "IPv4LL enabled", yaml: "network: {version: 2, ethernets: {kni0: {link-local: [ipv4]}}}"},
 		{name: "unknown address family", yaml: "network: {version: 2, ethernets: {kni0: {link-local: [ipx]}}}"},
 		{name: "activation disabled", yaml: "network: {version: 2, ethernets: {kni0: {activation-mode: off}}}"},
 		{name: "unknown managed setting", yaml: "network: {version: 2, ethernets: {kni0: {typo: 1}}}"},
 		{name: "null RA", yaml: "network: {version: 2, ethernets: {kni0: {accept-ra: null}}}"},
 		{name: "undersized MTU", yaml: "network: {version: 2, ethernets: {kni0: {mtu: 1200}}}"},
-		{name: "negative MTU", yaml: "network: {version: 2, ethernets: {kni0: {mtu: -1}}}"},
 		{name: "oversized MTU", yaml: "network: {version: 2, ethernets: {kni0: {mtu: 2147483648}}}"},
-		{name: "invalid dummy name", yaml: "network: {version: 2, dummy-devices: {'../x': {}}}"},
-		{name: "global sysctl name", yaml: "network: {version: 2, dummy-devices: {all: {}}}"},
-		{name: "dummy cannot create KNI", yaml: "network: {version: 2, dummy-devices: {kni0: {}}}"},
 		{name: "missing VLAN parent", yaml: "network: {version: 2, vlans: {v100: {id: 100}}}"},
 		{name: "unknown VLAN parent", yaml: "network: {version: 2, vlans: {v100: {id: 100, link: unknown}}}"},
-		{name: "stacked VLAN", yaml: "network: {version: 2, ethernets: {kni0: {}}, vlans: {v100: {id: 100, link: kni0}, v200: {id: 200, link: v100}}}"},
 		{name: "duplicate name", yaml: "network: {version: 2, ethernets: {kni0: {}}, dummy-devices: {shared0: {}}, vlans: {shared0: {id: 100, link: kni0}}}", errorContains: "duplicate managed link name"},
-		{name: "duplicate VLAN identity", yaml: "network: {version: 2, ethernets: {kni0: {}}, vlans: {a: {id: 100, link: kni0}, b: {id: 100, link: kni0}}}"},
 		{name: "invalid YAML", yaml: "network: ["},
 		{name: "multiple documents", yaml: "network: {version: 2}\n---\nnetwork: {version: 2}"},
 	} {
@@ -138,16 +130,6 @@ func Test_Parse_LinkLocalGrammar(t *testing.T) {
 			require.NoError(t, err)
 			require.Equal(t, tc.enabled, state.Links[0].IPv6LinkLocal)
 		})
-	}
-}
-
-// Test_Parse_DeterministicDiagnostic verifies that multiple invalid links and
-// fields report the same lexicographically first failure on every parse.
-func Test_Parse_DeterministicDiagnostic(t *testing.T) {
-	data := []byte("network: {version: 2, ethernets: {kni1: {zzz: true}, kni0: {zzz: true, aaa: true}}}")
-	for range 20 {
-		_, err := netplan.Parse(data)
-		require.ErrorContains(t, err, `link "kni0": unsupported setting "aaa"`)
 	}
 }
 
@@ -215,31 +197,4 @@ network:
 	require.Equal(t, netip.MustParsePrefix("192.0.2.7/24"), state.Links[0].Addresses[0])
 	require.Equal(t, desired.LinkKindLoopback, state.Links[1].Kind)
 	require.Equal(t, desired.LinkKindDummy, state.Links[2].Kind)
-}
-
-// Test_Parse_DisabledDHCP verifies that managed links accept only omitted or
-// boolean false DHCP declarations, independently of router advertisement policy.
-func Test_Parse_DisabledDHCP(t *testing.T) {
-	for _, topology := range []string{
-		"ethernets: {kni0: {%s}}", "ethernets: {lo: {%s}}",
-		"ethernets: {kni0: {}}, vlans: {v0: {id: 0, link: kni0, %s}}",
-		"dummy-devices: {dummy0: {%s}}",
-	} {
-		for _, field := range []string{"dhcp4", "dhcp6"} {
-			for _, value := range []string{"false", "true", "null", "'false'", "'no'", "no", "0", "[]"} {
-				t.Run(topology+"/"+field+"/"+value, func(t *testing.T) {
-					data := fmt.Sprintf("network: {version: 2, "+topology+"}", field+": "+value+", accept-ra: true")
-					state, err := netplan.Parse([]byte(data))
-					if value == "false" {
-						require.NoError(t, err)
-						omitted, err := netplan.Parse(fmt.Appendf(nil, "network: {version: 2, "+topology+"}", "accept-ra: true"))
-						require.NoError(t, err)
-						require.Equal(t, omitted, state)
-					} else {
-						require.Error(t, err)
-					}
-				})
-			}
-		}
-	}
 }

@@ -85,7 +85,7 @@ native:
 | `ethernets` | Only declared `kni[0-9]+` and existing `lo` are managed; neither is created. |
 | `vlans` | Directly on a declared KNI; required `id` (0..4094) and `link` (parent name). |
 | `dummy-devices` | Explicitly declared dummy interfaces. Reserved base-interface names are rejected. |
-| `addresses` | IPv4/IPv6 prefix strings. An omitted or empty list does not remove other addresses. Unspecified addresses and IPv4-mapped IPv6 prefixes are rejected. |
+| `addresses` | Static IPv4/IPv6 prefix strings. Existing matching addresses are made permanent and preferred. An omitted or empty list does not remove other addresses. Unspecified, multicast and IPv4-mapped IPv6 addresses are rejected; `::1` requires `lo`. |
 | `mtu` | Omitted or 0 preserves existing MTU; otherwise 1280..2147483647, subject to kernel and parent limits. |
 | `link-local` | Omitted enables automatic IPv6LL. `[]` disables generation; `[ipv6]` enables it. IPv6 and NDP stay enabled. |
 | `accept-ra` | Optional boolean; omission leaves kernel policy untouched. False writes 0, true writes 2 to permit RA with forwarding enabled. |
@@ -102,6 +102,12 @@ only from managed non-loopback links, after explicit addresses are ensured.
 Explicitly listed link-local addresses are retained. A configured IPv6 address
 with failed DAD is removed and re-added for retry; tentative addresses prevent
 bootstrap completion. A conflicting IPv6 prefix length is rejected.
+
+With automatic IPv6LL enabled, non-loopback links must have a preferred link-local
+address that has completed DAD before bootstrap succeeds. Missing carrier or failed
+automatic DAD keeps bootstrap pending; unlisted failed addresses are not deleted.
+Resolve the link or duplicate-address problem externally. Unrelated tentative global
+addresses do not block bootstrap. Loopback does not require a link-local address.
 
 Native input strictly rejects unknown sections/fields, duplicate keys, null
 values and incorrect YAML types. Numeric fields require unquoted decimal integers;
@@ -193,7 +199,7 @@ require `NETCONFIG_NETNS_TESTS=1` and run serially across packages.
 Coverage includes strict parsing, address-family validation, replacement identity,
 MTU ordering, IPv6LL/DAD, delayed KNI, partial progress, cancellation, immutable
 input during retries, preservation of foreign addresses, SIGTERM without teardown,
-restart reconciliation and no mutation after successful bootstrap.
+restart reconciliation, permanent static lifetimes and automatic link-local readiness.
 
 ## License
 

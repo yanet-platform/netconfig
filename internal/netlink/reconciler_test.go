@@ -162,7 +162,18 @@ func (m *fakeBackend) AddrReplace(link vnetlink.Link, address *vnetlink.Addr) er
 	if err := m.Failures["address:"+address.String()]; err != nil {
 		return err
 	}
-	m.Addresses[name] = append(m.Addresses[name], *address)
+	replacement := *address
+	if replacement.ValidLft == 0 && replacement.PreferedLft == 0 {
+		replacement.ValidLft, replacement.PreferedLft = int(^uint32(0)), int(^uint32(0))
+	}
+	index := slices.IndexFunc(m.Addresses[name], func(current vnetlink.Addr) bool {
+		return current.Equal(*address)
+	})
+	if index < 0 {
+		m.Addresses[name] = append(m.Addresses[name], replacement)
+	} else {
+		m.Addresses[name][index] = replacement
+	}
 	m.Operations = append(m.Operations, "address:"+name+":"+address.String())
 	return nil
 }
@@ -278,6 +289,50 @@ func Test_Reconciler_TentativeAddressBlocksConvergence(t *testing.T) {
 	require.Empty(t, backend.Operations)
 }
 
+// Missing carrier, pending/failed DAD and deprecated LL cannot authorize success.
+// Unowned addresses are observed, never repaired, when automatic LL is enabled.
+func Test_Reconciler_AutomaticLinkLocalReadiness(t *testing.T) {
+	for _, tc := range []struct {
+		name                     string
+		flags                    int
+		missing, loopback, ready bool
+	}{
+		{name: "no carrier", missing: true},
+		{name: "tentative", flags: unix.IFA_F_TENTATIVE},
+		{name: "failed DAD", flags: unix.IFA_F_DADFAILED},
+		{name: "deprecated", flags: unix.IFA_F_DEPRECATED},
+		{name: "ready", ready: true},
+		{name: "loopback needs no LL", missing: true, loopback: true, ready: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			backend := newFakeBackend()
+			wanted := desired.Link{Name: "kni0", IPv6LinkLocal: true}
+			link := baseLink(wanted.Name, 1)
+			link.Flags = net.FlagUp
+			if tc.loopback {
+				wanted.Name, wanted.Kind = "lo", desired.LinkKindLoopback
+				link.Name, link.Flags = "lo", net.FlagUp|net.FlagLoopback
+			}
+			backend.Links[wanted.Name] = link
+			foreign := mustAddr("2001:db8::99/64")
+			foreign.Flags = unix.IFA_F_TENTATIVE
+			backend.Addresses[wanted.Name] = []vnetlink.Addr{foreign}
+			if !tc.missing {
+				address := mustAddr("fe80::abcd/64")
+				address.Flags = tc.flags
+				backend.Addresses[wanted.Name] = append(backend.Addresses[wanted.Name], address)
+			}
+			err := netreconcile.NewReconciler(backend, backend).Configure(t.Context(), desired.State{Links: []desired.Link{wanted}})
+			if tc.ready {
+				require.NoError(t, err)
+			} else {
+				require.ErrorContains(t, err, "link-local address is not ready")
+			}
+			require.Empty(t, backend.Operations)
+		})
+	}
+}
+
 // Test_Reconciler_CancellationDuringLookup verifies that cancellation at the
 // final identity lookup prevents the next otherwise necessary MTU mutation.
 func Test_Reconciler_CancellationDuringLookup(t *testing.T) {
@@ -323,6 +378,7 @@ func mustAddr(value string) vnetlink.Addr {
 	if err != nil {
 		panic(err)
 	}
+	address.ValidLft, address.PreferedLft = int(^uint32(0)), int(^uint32(0))
 	return *address
 }
 

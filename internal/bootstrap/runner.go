@@ -42,16 +42,8 @@ type Runner struct {
 	log        *zap.Logger
 }
 
-// Option configures bootstrap diagnostics.
-type Option func(*Runner)
-
-// WithLog directs startup and retry diagnostics to a structured logger.
-func WithLog(log *zap.Logger) Option {
-	return func(m *Runner) { m.log = log }
-}
-
 // NewRunner validates and detaches configuration before the first setup pass.
-func NewRunner(state desired.State, reconciler Reconciler, config *Config, options ...Option) (*Runner, error) {
+func NewRunner(state desired.State, reconciler Reconciler, config *Config, log *zap.Logger) (*Runner, error) {
 	if err := state.Validate(); err != nil {
 		return nil, fmt.Errorf("startup configuration: %w", err)
 	}
@@ -61,14 +53,10 @@ func NewRunner(state desired.State, reconciler Reconciler, config *Config, optio
 	if reconciler == nil {
 		return nil, errors.New("bootstrap reconciler is nil")
 	}
-	m := &Runner{state: state.Clone(), reconciler: reconciler, config: *config, log: zap.NewNop()}
-	for _, option := range options {
-		option(m)
+	if log == nil {
+		log = zap.NewNop()
 	}
-	if m.log == nil {
-		return nil, errors.New("bootstrap logger is nil")
-	}
-	return m, nil
+	return &Runner{state: state.Clone(), reconciler: reconciler, config: *config, log: log}, nil
 }
 
 // Run retries both setup phases until success or cancellation without rollback.

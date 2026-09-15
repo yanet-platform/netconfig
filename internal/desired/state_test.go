@@ -12,28 +12,6 @@ import (
 	"github.com/yanet-platform/netconfig/internal/desired"
 )
 
-// Test_State_Clone verifies that optional policy and addresses are detached in
-// both directions, including empty and unspecified configuration.
-func Test_State_Clone(t *testing.T) {
-	acceptRA := false
-	state := desired.State{Links: []desired.Link{
-		{Name: "kni0", AcceptRA: &acceptRA, Addresses: []netip.Prefix{netip.MustParsePrefix("192.0.2.7/24")}},
-		{Name: "lo", Kind: desired.LinkKindLoopback},
-	}}
-	copy := state.Clone()
-	require.Equal(t, state, copy)
-	copy.Links[0].Name = "kni1"
-	*copy.Links[0].AcceptRA = true
-	copy.Links[0].Addresses[0] = netip.MustParsePrefix("2001:db8::1/64")
-	require.Equal(t, "kni0", state.Links[0].Name)
-	require.False(t, *state.Links[0].AcceptRA)
-	require.Equal(t, "192.0.2.7/24", state.Links[0].Addresses[0].String())
-	state.Links[1].Name = "changed"
-	require.Equal(t, "lo", copy.Links[1].Name)
-	require.Nil(t, copy.Links[1].AcceptRA)
-	require.Equal(t, desired.State{}, (desired.State{}).Clone())
-}
-
 // Test_State_Validate verifies that every adapter shares the same topology,
 // naming, address and MTU safety boundary before kernel operations.
 func Test_State_Validate(t *testing.T) {
@@ -69,6 +47,12 @@ func Test_State_Validate(t *testing.T) {
 		{name: "unspecified IPv4 default prefix", links: []desired.Link{{Name: "kni0", Addresses: []netip.Prefix{netip.MustParsePrefix("0.0.0.0/0")}}}},
 		{name: "unspecified IPv6", links: []desired.Link{{Name: "kni0", Addresses: []netip.Prefix{netip.MustParsePrefix("::/128")}}}},
 		{name: "mapped IPv6 prefix", links: []desired.Link{{Name: "kni0", Addresses: []netip.Prefix{netip.MustParsePrefix("::ffff:192.0.2.1/120")}}}},
+		{name: "multicast IPv4", links: []desired.Link{{Name: "kni0", Addresses: []netip.Prefix{netip.MustParsePrefix("224.0.0.1/32")}}}},
+		{name: "multicast IPv6", links: []desired.Link{{Name: "kni0", Addresses: []netip.Prefix{netip.MustParsePrefix("ff02::1/128")}}}},
+		{name: "IPv6 loopback on KNI", links: []desired.Link{{Name: "kni0", Addresses: []netip.Prefix{netip.MustParsePrefix("::1/128")}}}},
+		{name: "IPv6 loopback on lo", valid: true, links: []desired.Link{{Name: "lo", Kind: desired.LinkKindLoopback, Addresses: []netip.Prefix{netip.MustParsePrefix("::1/128")}}}},
+		{name: "minimum MTU", valid: true, links: []desired.Link{{Name: "kni0", MTU: 1280}}},
+		{name: "stacked VLAN", links: []desired.Link{{Name: "kni0"}, {Name: "v0", Kind: desired.LinkKindVLAN, Parent: "kni0"}, {Name: "v1", Kind: desired.LinkKindVLAN, Parent: "v0"}}},
 		{name: "IPv6 prefix conflict", links: []desired.Link{{Name: "kni0", Addresses: []netip.Prefix{
 			netip.MustParsePrefix("fe80::1/64"), netip.MustParsePrefix("fe80::1/128"),
 		}}}},

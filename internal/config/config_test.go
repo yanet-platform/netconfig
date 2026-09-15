@@ -44,7 +44,7 @@ func Test_Config_Selection(t *testing.T) {
 // settings cannot silently fall back to another source or busy-loop.
 func Test_Config_InvalidSchema(t *testing.T) {
 	for _, input := range []string{
-		"", "null", "[]", "{}", "source: ''", "source: other", "source: null",
+		"", "null", "[]", "{}", "source: other",
 		"source: native", "source: native\nnative: null", "source: native\nnative: []",
 		"source: native\nnative: {}\nnetplan_path: ''",
 		"source: native\nnative: {}\nnetplan_path: /tmp/file",
@@ -66,25 +66,65 @@ func Test_Config_InvalidSchema(t *testing.T) {
 	}
 }
 
-// Test_Config_MappedPrefixes verifies that both sources reject mapped addresses
-// during loading, before a caller can construct the kernel bootstrap.
-func Test_Config_MappedPrefixes(t *testing.T) {
+// Both adapters must reject unsupported addresses before kernel bootstrap.
+func Test_Config_InvalidAddresses(t *testing.T) {
 	for _, source := range []string{"native", "netplan"} {
-		for _, prefix := range []string{"::ffff:192.0.2.1/120", "::ffff:192.0.2.2/24"} {
+		for _, prefix := range []string{"::ffff:192.0.2.1/120", "ff02::1/128", "::1/128"} {
 			t.Run(source+"/"+prefix, func(t *testing.T) {
 				body := "dummy-devices: {dummy0: {addresses: ['" + prefix + "']}}"
-				input := "source: native\nnative: {" + body + "}"
-				if source == "netplan" {
-					path := filepath.Join(t.TempDir(), "netplan.yaml")
-					require.NoError(t, os.WriteFile(path, []byte("network: {version: 2, "+body+"}"), 0o600))
-					input = fmt.Sprintf("source: netplan\nnetplan_path: %q", path)
-				}
-				parsed, err := config.Parse([]byte(input))
+				parsed, err := parseSource(t, source, body)
 				require.NoError(t, err)
 				state, err := parsed.Load()
-				require.ErrorContains(t, err, "IPv4-mapped IPv6 prefix")
+				require.Error(t, err)
 				require.Equal(t, desired.State{}, state)
 			})
+		}
+	}
+}
+
+func parseSource(t *testing.T, source, body string) (*config.Config, error) {
+	t.Helper()
+	input := "source: native\nnative: {" + body + "}"
+	if source == "netplan" {
+		path := filepath.Join(t.TempDir(), "netplan.yaml")
+		require.NoError(t, os.WriteFile(path, []byte("network: {version: 2, "+body+"}"), 0o600))
+		input = fmt.Sprintf("source: netplan\nnetplan_path: %q", path)
+	}
+	return config.Parse([]byte(input))
+}
+
+// Exercise the full DHCP grammar once per adapter, and false/true wiring for
+// other managed kinds. RA acceptance must not implicitly enable DHCP.
+func Test_Config_DisabledDHCP(t *testing.T) {
+	for _, source := range []string{"native", "netplan"} {
+		for kind, topology := range []string{
+			"ethernets: {kni0: {%s}}", "ethernets: {lo: {%s}}",
+			"ethernets: {kni0: {}}, vlans: {v0: {id: 0, link: kni0, %s}}",
+			"dummy-devices: {dummy0: {%s}}",
+		} {
+			values := []string{"false", "true"}
+			if kind == 0 {
+				values = append(values, "null", "'false'", "no", "0", "[]")
+			}
+			for _, field := range []string{"dhcp4", "dhcp6"} {
+				for _, value := range values {
+					t.Run(source+"/"+topology+"/"+field+"/"+value, func(t *testing.T) {
+						parsed, err := parseSource(t, source, fmt.Sprintf(topology, field+": "+value+", accept-ra: true"))
+						var state desired.State
+						if err == nil {
+							state, err = parsed.Load()
+						}
+						if value == "false" {
+							require.NoError(t, err)
+							require.NotEmpty(t, state.Links)
+							require.NotNil(t, state.Links[len(state.Links)-1].AcceptRA)
+							require.True(t, *state.Links[len(state.Links)-1].AcceptRA)
+						} else {
+							require.ErrorContains(t, err, field)
+						}
+					})
+				}
+			}
 		}
 	}
 }

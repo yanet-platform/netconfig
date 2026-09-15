@@ -109,11 +109,11 @@ func (m *Config) Load() (desired.State, error) {
 		return desired.State{}, err
 	}
 	if m.Source == "native" {
-		return (&native.Source{Config: *m.Native}).Load()
+		return m.Native.Load()
 	}
 	path := m.NetplanPath
 	if path == "" {
 		path = "/etc/netplan/00-interfaces.yaml"
 	}
-	return (&netplan.Source{Path: path}).Load()
+	return netplan.ParseFile(path)
 }

@@ -56,7 +56,7 @@ func ValidateMTU(mtu int) error {
 	return nil
 }
 
-// ValidateAddresses rejects invalid, unspecified or IPv4-mapped prefixes and
+// ValidateAddresses rejects invalid, unspecified, multicast or IPv4-mapped prefixes and
 // conflicting IPv6 prefix lengths. Identical repeated addresses are permitted.
 func ValidateAddresses(addresses []netip.Prefix) error {
 	ipv6Prefixes := map[netip.Addr]int{}
@@ -67,6 +67,9 @@ func ValidateAddresses(addresses []netip.Prefix) error {
 		address := prefix.Addr()
 		if address.IsUnspecified() {
 			return fmt.Errorf("address %d: unspecified address %q is not supported", idx, prefix)
+		}
+		if address.IsMulticast() {
+			return fmt.Errorf("address %d: multicast address %q is not supported", idx, prefix)
 		}
 		if address.Is4In6() {
 			return fmt.Errorf("address %d: IPv4-mapped IPv6 prefix %q is not supported", idx, prefix)
@@ -103,6 +106,11 @@ func (m State) Validate() error {
 		}
 		if err := ValidateAddresses(link.Addresses); err != nil {
 			return fmt.Errorf("link %q: %w", link.Name, err)
+		}
+		for _, prefix := range link.Addresses {
+			if prefix.Addr().Is6() && prefix.Addr().IsLoopback() && link.Kind != LinkKindLoopback {
+				return fmt.Errorf("link %q: IPv6 loopback address requires kernel loopback lo", link.Name)
+			}
 		}
 		if _, duplicate := links[link.Name]; duplicate {
 			return fmt.Errorf("duplicate managed link name %q", link.Name)

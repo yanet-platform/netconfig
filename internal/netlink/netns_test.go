@@ -5,16 +5,87 @@ package netlink_test
 
 import (
 	"errors"
+	"fmt"
 	"net/netip"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
 	vnetlink "github.com/vishvananda/netlink"
+	"golang.org/x/sys/unix"
+
 	"github.com/yanet-platform/netconfig/internal/desired"
 	netreconcile "github.com/yanet-platform/netconfig/internal/netlink"
 )
+
+// Kernel cacheinfo, unlike a prefix-only fake, distinguishes static addresses
+// from expiring/deprecated ones. Only explicitly desired addresses are promoted.
+func Test_Reconciler_NetnsStaticLifetimes(t *testing.T) {
+	if os.Getenv("NETCONFIG_NETNS_TESTS") != "1" {
+		t.Skip("requires a disposable network namespace")
+	}
+	for _, preferred := range []int{60, 0} {
+		t.Run(fmt.Sprint(preferred), func(t *testing.T) {
+			handle, err := vnetlink.NewHandle()
+			require.NoError(t, err)
+			t.Cleanup(handle.Close)
+			link := &vnetlink.Dummy{LinkAttrs: vnetlink.LinkAttrs{Name: "lifetime0"}}
+			require.NoError(t, handle.LinkAdd(link))
+			t.Cleanup(func() { _ = handle.LinkDel(link) })
+			require.NoError(t, handle.LinkSetUp(link))
+			wanted := desired.Link{Name: "lifetime0", Kind: desired.LinkKindDummy}
+			for _, prefix := range []string{"192.0.2.20/24", "2001:db8::20/64", "2001:db8::21/64"} {
+				address := mustAddr(prefix)
+				address.ValidLft, address.PreferedLft = 60, preferred
+				address.Flags = unix.IFA_F_NODAD
+				require.NoError(t, handle.AddrReplace(link, &address))
+				wanted.Addresses = append(wanted.Addresses, netip.MustParsePrefix(prefix))
+			}
+			// Leave the last address outside netconfig's ownership.
+			wanted.Addresses = wanted.Addresses[:2]
+			reconciler := netreconcile.NewReconciler(handle, netreconcile.NewProcSysctl())
+			for range 2 {
+				require.NoError(t, reconciler.Configure(t.Context(), desired.State{Links: []desired.Link{wanted}}))
+				addresses, err := handle.AddrList(link, vnetlink.FAMILY_ALL)
+				require.NoError(t, err)
+				require.Len(t, addresses, 3)
+				for _, address := range addresses {
+					if address.IP.String() == "2001:db8::21" {
+						require.InDelta(t, 60, address.ValidLft, 5)
+						require.InDelta(t, preferred, address.PreferedLft, 5)
+					} else {
+						require.Equal(t, int(^uint32(0)), address.ValidLft)
+						require.Equal(t, int(^uint32(0)), address.PreferedLft)
+						require.Zero(t, address.Flags&unix.IFA_F_DEPRECATED)
+					}
+				}
+			}
+		})
+	}
+}
+
+// Automatic link-local DAD is asynchronous even when no addresses are explicit.
+func Test_Reconciler_NetnsAutomaticLinkLocal(t *testing.T) {
+	if os.Getenv("NETCONFIG_NETNS_TESTS") != "1" {
+		t.Skip("requires a disposable network namespace")
+	}
+	handle, err := vnetlink.NewHandle()
+	require.NoError(t, err)
+	t.Cleanup(handle.Close)
+	link := newKernelTAP(t, handle, "kni7", 1500)
+	require.NoError(t, os.WriteFile(filepath.Join("/proc/sys/net/ipv6/conf", "kni7", "dad_transmits"), []byte("2"), 0))
+	state := desired.State{Links: []desired.Link{{Name: "kni7", IPv6LinkLocal: true}}}
+	reconciler := netreconcile.NewReconciler(handle, netreconcile.NewProcSysctl())
+	require.ErrorContains(t, reconciler.Configure(t.Context(), state), "link-local address is not ready")
+	require.Eventually(t, func() bool { return reconciler.Configure(t.Context(), state) == nil }, 5*time.Second, 20*time.Millisecond)
+	addresses, err := handle.AddrList(link, vnetlink.FAMILY_V6)
+	require.NoError(t, err)
+	require.Len(t, addresses, 1)
+	require.True(t, addresses[0].IP.IsLinkLocalUnicast())
+	require.Zero(t, addresses[0].Flags&(unix.IFA_F_TENTATIVE|unix.IFA_F_DADFAILED))
+}
 
 // Test_Reconciler_NetnsMTU verifies that Linux enforces the intended parent and
 // child MTUs without changing unrelated interfaces.

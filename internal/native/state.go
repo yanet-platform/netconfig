@@ -13,21 +13,16 @@ import (
 	"github.com/yanet-platform/netconfig/internal/desired"
 )
 
-// Source normalizes the embedded startup configuration without external files.
-type Source struct {
-	Config Config
-}
-
 // Load returns a validated state that owns all of its mutable configuration.
-func (m *Source) Load() (desired.State, error) {
+func (m *Config) Load() (desired.State, error) {
 	state := desired.State{}
 	for _, section := range []struct {
 		Links map[string]LinkConfig
 		Kind  desired.LinkKind
 	}{
-		{m.Config.Ethernets, desired.LinkKindKNI},
-		{m.Config.VLANs, desired.LinkKindVLAN},
-		{m.Config.DummyDevices, desired.LinkKindDummy},
+		{m.Ethernets, desired.LinkKindKNI},
+		{m.VLANs, desired.LinkKindVLAN},
+		{m.DummyDevices, desired.LinkKindDummy},
 	} {
 		for _, name := range slices.Sorted(maps.Keys(section.Links)) {
 			config := section.Links[name]
@@ -69,5 +64,3 @@ func (m *Source) Load() (desired.State, error) {
 	}
 	return state, nil
 }
-
-var _ desired.Source = (*Source)(nil)

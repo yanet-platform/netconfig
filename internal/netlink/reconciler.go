@@ -339,7 +339,10 @@ func (m *Reconciler) configureLink(ctx context.Context, wanted desired.Link, ide
 				}
 				continue
 			}
-			present = present || bits == desired.Bits()
+			// A static address must survive after the startup worker exits.
+			present = present || bits == desired.Bits() &&
+				address.ValidLft == int(^uint32(0)) && address.PreferedLft == int(^uint32(0)) &&
+				address.Flags&unix.IFA_F_DEPRECATED == 0
 		}
 		if present {
 			continue
@@ -363,31 +366,29 @@ func (m *Reconciler) configureLink(ctx context.Context, wanted desired.Link, ide
 	if err != nil {
 		return fmt.Errorf("check IPv6 address readiness: %w", err)
 	}
+	linkLocalReady := false
 	for _, address := range addresses {
-		if address.IPNet == nil || address.Flags&(unix.IFA_F_DADFAILED|unix.IFA_F_TENTATIVE) == 0 {
+		if address.IPNet == nil {
 			continue
 		}
-		if slices.ContainsFunc(wanted.Addresses, func(prefix netip.Prefix) bool {
+		ready := address.Flags&(unix.IFA_F_DADFAILED|unix.IFA_F_TENTATIVE|unix.IFA_F_DEPRECATED) == 0
+		linkLocalReady = linkLocalReady || address.IP.IsLinkLocalUnicast() && ready
+		if !ready && slices.ContainsFunc(wanted.Addresses, func(prefix netip.Prefix) bool {
 			return prefix.Addr().Is6() && address.IP.Equal(prefix.Addr().AsSlice())
 		}) {
 			return fmt.Errorf("desired IPv6 address %s has not completed duplicate address detection", address.IP)
 		}
 	}
+	if wanted.Kind != desired.LinkKindLoopback && wanted.IPv6LinkLocal && !linkLocalReady {
+		return errors.New("IPv6 link-local address is not ready; waiting for carrier and duplicate address detection")
+	}
 	if wanted.Kind != desired.LinkKindLoopback && !wanted.IPv6LinkLocal {
-		return m.removeUnlistedIPv6LL(ctx, wanted, identities)
+		return m.removeUnlistedIPv6LL(ctx, wanted, identities, addresses)
 	}
 	return validate()
 }
 
-func (m *Reconciler) removeUnlistedIPv6LL(ctx context.Context, wanted desired.Link, identities map[string]LinkIdentity) error {
-	link, err := m.resolveConfigured(ctx, wanted, identities)
-	if err != nil {
-		return err
-	}
-	addresses, err := m.backend.AddrList(link, vnetlink.FAMILY_V6)
-	if err != nil {
-		return err
-	}
+func (m *Reconciler) removeUnlistedIPv6LL(ctx context.Context, wanted desired.Link, identities map[string]LinkIdentity, addresses []vnetlink.Addr) error {
 	for _, address := range addresses {
 		if address.IPNet == nil || address.IP.To4() != nil || !address.IP.IsLinkLocalUnicast() {
 			continue
@@ -397,7 +398,7 @@ func (m *Reconciler) removeUnlistedIPv6LL(ctx context.Context, wanted desired.Li
 		}) {
 			continue
 		}
-		link, err = m.resolveConfigured(ctx, wanted, identities)
+		link, err := m.resolveConfigured(ctx, wanted, identities)
 		if err != nil {
 			return err
 		}
@@ -405,7 +406,7 @@ func (m *Reconciler) removeUnlistedIPv6LL(ctx context.Context, wanted desired.Li
 			return fmt.Errorf("remove unlisted IPv6 link-local address: %w", err)
 		}
 	}
-	_, err = m.resolveConfigured(ctx, wanted, identities)
+	_, err := m.resolveConfigured(ctx, wanted, identities)
 	return err
 }
 

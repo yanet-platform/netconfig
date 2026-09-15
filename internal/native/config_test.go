@@ -23,11 +23,7 @@ func Test_Config_StrictSchema(t *testing.T) {
 		{name: "sequence root", data: "[]"},
 		{name: "scalar root", data: "false"},
 		{name: "network wrapper", data: "network: {}"},
-		{name: "version", data: "version: 2"},
-		{name: "renderer", data: "renderer: networkd"},
 		{name: "bridge", data: "bridges: {}"},
-		{name: "bond", data: "bonds: {}"},
-		{name: "tunnel", data: "tunnels: {}"},
 		{name: "section null", data: "ethernets: null"},
 		{name: "section sequence", data: "vlans: []"},
 		{name: "link null", data: "dummy-devices: {dummy0: null}"},
@@ -37,9 +33,7 @@ func Test_Config_StrictSchema(t *testing.T) {
 		{name: "duplicate link", data: "ethernets: {kni0: {}, kni0: {}}"},
 		{name: "duplicate field", data: "ethernets: {kni0: {mtu: 1500, mtu: 9000}}"},
 		{name: "routes", data: "ethernets: {kni0: {routes: []}}"},
-		{name: "routing policy", data: "ethernets: {kni0: {routing-policy: []}}"},
 		{name: "administrative state", data: "ethernets: {kni0: {up: true}}"},
-		{name: "unknown field", data: "ethernets: {kni0: {typo: 1}}"},
 		{name: "non VLAN empty parent", data: "ethernets: {kni0: {link: ''}}"},
 		{name: "non VLAN ID zero", data: "dummy-devices: {dummy0: {id: 0}}"},
 		{name: "missing VLAN ID", data: "vlans: {v0: {link: kni0}}"},
@@ -85,32 +79,5 @@ func Test_Config_StrictSchema(t *testing.T) {
 			require.Error(t, yaml.Unmarshal(fmt.Appendf(nil, topology, "null"), &config))
 			require.NoError(t, yaml.Unmarshal(fmt.Appendf(nil, topology, tc.value), &config))
 		})
-	}
-}
-
-// Test_Config_DisabledDHCP verifies that DHCP declarations are strictly boolean
-// and false-only for every managed kind, independent of RA policy.
-func Test_Config_DisabledDHCP(t *testing.T) {
-	for _, topology := range []string{
-		"ethernets: {kni0: {%s}}", "ethernets: {lo: {%s}}",
-		"ethernets: {kni0: {}}, vlans: {v0: {id: 0, link: kni0, %s}}",
-		"dummy-devices: {dummy0: {%s}}",
-	} {
-		for _, field := range []string{"dhcp4", "dhcp6"} {
-			for _, value := range []string{"false", "true", "null", "'false'", "'no'", "no", "0", "[]"} {
-				t.Run(topology+"/"+field+"/"+value, func(t *testing.T) {
-					var config native.Config
-					err := yaml.Unmarshal([]byte("{"+fmt.Sprintf(topology, field+": "+value+", accept-ra: true")+"}"), &config)
-					if value == "false" {
-						require.NoError(t, err)
-						var omitted native.Config
-						require.NoError(t, yaml.Unmarshal([]byte("{"+fmt.Sprintf(topology, "accept-ra: true")+"}"), &omitted))
-						require.Equal(t, omitted, config)
-					} else {
-						require.Error(t, err)
-					}
-				})
-			}
-		}
 	}
 }

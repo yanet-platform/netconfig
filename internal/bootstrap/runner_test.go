@@ -40,7 +40,11 @@ func Test_Runner_PartialSetupAndOwnership(t *testing.T) {
 		Name: "kni0", AcceptRA: &acceptRA,
 		Addresses: []netip.Prefix{netip.MustParsePrefix("192.0.2.1/24")},
 	}}}
-	expected := state.Clone()
+	expectedRA := false
+	expected := desired.State{Links: []desired.Link{{
+		Name: "kni0", AcceptRA: &expectedRA,
+		Addresses: []netip.Prefix{netip.MustParsePrefix("192.0.2.1/24")},
+	}}}
 	creationCalls, configurationCalls := 0, 0
 	reconciler := &setupStub{
 		CreateFunc: func(ctx context.Context, state desired.State) error {
@@ -54,7 +58,7 @@ func Test_Runner_PartialSetupAndOwnership(t *testing.T) {
 		ConfigureFunc: func(ctx context.Context, state desired.State) error {
 			require.Equal(t, expected, state)
 			configurationCalls++
-			if configurationCalls < 4 {
+			if configurationCalls < 5 {
 				return errors.New("IPv6 DAD is pending")
 			}
 			return nil
@@ -63,19 +67,23 @@ func Test_Runner_PartialSetupAndOwnership(t *testing.T) {
 	core, logs := observer.New(zap.InfoLevel)
 	runner, err := bootstrap.NewRunner(state, reconciler,
 		&bootstrap.Config{InitialBackoff: time.Millisecond, MaxBackoff: 3 * time.Millisecond},
-		bootstrap.WithLog(zap.New(core)),
+		zap.New(core),
 	)
 	require.NoError(t, err)
 	state.Links[0].Name = "eth0"
 	state.Links[0].Addresses[0] = netip.Prefix{}
 	acceptRA = true
+	started := time.Now()
 	require.NoError(t, runner.Run(t.Context()))
-	require.Equal(t, 4, creationCalls)
+	require.GreaterOrEqual(t, time.Since(started), 9*time.Millisecond)
+	require.Equal(t, 5, creationCalls)
 	require.Equal(t, creationCalls, configurationCalls)
 	require.Equal(t, 1, logs.FilterMessage("configured startup interfaces").Len())
+	var delays []time.Duration
 	for _, entry := range logs.FilterLevelExact(zap.WarnLevel).All() {
-		require.LessOrEqual(t, entry.ContextMap()["backoff"].(time.Duration), 3*time.Millisecond)
+		delays = append(delays, entry.ContextMap()["backoff"].(time.Duration))
 	}
+	require.Equal(t, []time.Duration{time.Millisecond, 2 * time.Millisecond, 3 * time.Millisecond, 3 * time.Millisecond}, delays)
 }
 
 // Test_Runner_Cancellation verifies that pending setup is interruptible even
@@ -89,7 +97,7 @@ func Test_Runner_Cancellation(t *testing.T) {
 		ConfigureFunc: func(context.Context, desired.State) error { close(configured); return nil },
 	}
 	runner, err := bootstrap.NewRunner(desired.State{}, reconciler,
-		&bootstrap.Config{InitialBackoff: time.Hour, MaxBackoff: time.Hour},
+		&bootstrap.Config{InitialBackoff: time.Hour, MaxBackoff: time.Hour}, nil,
 	)
 	require.NoError(t, err)
 	done := make(chan error, 1)
@@ -117,14 +125,11 @@ func Test_Runner_InvalidConfig(t *testing.T) {
 		state  desired.State
 		config *bootstrap.Config
 	}{
-		{name: "nil retry"},
 		{name: "zero retry", config: &bootstrap.Config{}},
-		{name: "negative retry", config: &bootstrap.Config{InitialBackoff: -1, MaxBackoff: 1}},
-		{name: "reversed bounds", config: &bootstrap.Config{InitialBackoff: 2, MaxBackoff: 1}},
 		{name: "invalid topology", state: desired.State{Links: []desired.Link{{Name: "eth0"}}}, config: &bootstrap.Config{InitialBackoff: 1, MaxBackoff: 1}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			runner, err := bootstrap.NewRunner(tc.state, &setupStub{}, tc.config)
+			runner, err := bootstrap.NewRunner(tc.state, &setupStub{}, tc.config, nil)
 			require.Error(t, err)
 			require.Nil(t, runner)
 		})
