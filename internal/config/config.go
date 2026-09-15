@@ -11,7 +11,7 @@ import (
 	"os"
 	"time"
 
-	"gopkg.in/yaml.v3"
+	"go.yaml.in/yaml/v3"
 
 	"github.com/yanet-platform/netconfig/internal/bootstrap"
 	"github.com/yanet-platform/netconfig/internal/desired"
@@ -44,8 +44,14 @@ func Parse(data []byte) (*Config, error) {
 		}
 		return nil, fmt.Errorf("decode trailing configuration: %w", err)
 	}
-	if err := config.Validate(); err != nil {
-		return nil, err
+	if config == nil || config.Source != "native" && config.Source != "netplan" {
+		return nil, errors.New("source must be netplan or native")
+	}
+	if config.Source == "native" && config.Native == nil {
+		return nil, errors.New("source: native requires native configuration")
+	}
+	if config.Retry.InitialBackoff <= 0 || config.Retry.MaxBackoff < config.Retry.InitialBackoff {
+		return nil, errors.New("retry requires 0 < initial_backoff <= max_backoff")
 	}
 	var fields map[string]yaml.Node
 	if err := yaml.Unmarshal(data, &fields); err != nil {
@@ -80,34 +86,8 @@ func ParseFile(path string) (*Config, error) {
 	return Parse(data)
 }
 
-// Validate rejects ambiguous sources and invalid retry delays.
-func (m *Config) Validate() error {
-	if m == nil {
-		return errors.New("configuration must be a mapping")
-	}
-	if err := m.Retry.Validate(); err != nil {
-		return err
-	}
-	switch m.Source {
-	case "netplan":
-		if m.Native != nil {
-			return errors.New("native configuration requires source: native")
-		}
-	case "native":
-		if m.Native == nil || m.NetplanPath != "" {
-			return errors.New("source: native requires native configuration and no netplan_path")
-		}
-	default:
-		return errors.New("source must be netplan or native")
-	}
-	return nil
-}
-
 // Load normalizes the selected source once, before bootstrap acquires resources.
 func (m *Config) Load() (desired.State, error) {
-	if err := m.Validate(); err != nil {
-		return desired.State{}, err
-	}
 	if m.Source == "native" {
 		return m.Native.Load()
 	}

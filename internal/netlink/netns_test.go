@@ -45,7 +45,7 @@ func Test_Reconciler_NetnsStaticLifetimes(t *testing.T) {
 			}
 			// Leave the last address outside netconfig's ownership.
 			wanted.Addresses = wanted.Addresses[:2]
-			reconciler := netreconcile.NewReconciler(handle, netreconcile.NewProcSysctl())
+			reconciler := netreconcile.NewReconciler(handle, netreconcile.ProcSysctl{})
 			for range 2 {
 				require.NoError(t, reconciler.Configure(t.Context(), desired.State{Links: []desired.Link{wanted}}))
 				addresses, err := handle.AddrList(link, vnetlink.FAMILY_ALL)
@@ -77,7 +77,7 @@ func Test_Reconciler_NetnsAutomaticLinkLocal(t *testing.T) {
 	link := newKernelTAP(t, handle, "kni7", 1500)
 	require.NoError(t, os.WriteFile(filepath.Join("/proc/sys/net/ipv6/conf", "kni7", "dad_transmits"), []byte("2"), 0))
 	state := desired.State{Links: []desired.Link{{Name: "kni7", IPv6LinkLocal: true}}}
-	reconciler := netreconcile.NewReconciler(handle, netreconcile.NewProcSysctl())
+	reconciler := netreconcile.NewReconciler(handle, netreconcile.ProcSysctl{})
 	require.ErrorContains(t, reconciler.Configure(t.Context(), state), "link-local address is not ready")
 	require.Eventually(t, func() bool { return reconciler.Configure(t.Context(), state) == nil }, 5*time.Second, 20*time.Millisecond)
 	addresses, err := handle.AddrList(link, vnetlink.FAMILY_V6)
@@ -143,7 +143,7 @@ func Test_Reconciler_NetnsMTU(t *testing.T) {
 				{Name: "aaa9", Kind: desired.LinkKindVLAN, Parent: "kni9", VLANID: 100, MTU: tc.desiredChild},
 				{Name: "kni9", MTU: tc.desiredParent},
 			}}
-			reconciler := netreconcile.NewReconciler(handle, netreconcile.NewProcSysctl())
+			reconciler := netreconcile.NewReconciler(handle, netreconcile.ProcSysctl{})
 			for idx := range 2 {
 				setup := func() error {
 					return errors.Join(reconciler.Create(t.Context(), state), reconciler.Configure(t.Context(), state))
@@ -207,7 +207,7 @@ func Test_Reconciler_Netns(t *testing.T) {
 		{Name: "lo", Kind: desired.LinkKindLoopback, MTU: 9000},
 		{Name: "dummy9", Kind: desired.LinkKindDummy, MTU: 9000},
 	}}
-	reconciler := netreconcile.NewReconciler(handle, netreconcile.NewProcSysctl())
+	reconciler := netreconcile.NewReconciler(handle, netreconcile.ProcSysctl{})
 	require.Error(t, reconciler.Create(t.Context(), state))
 	require.Error(t, reconciler.Configure(t.Context(), state))
 	for _, name := range []string{"lo", "dummy9"} {

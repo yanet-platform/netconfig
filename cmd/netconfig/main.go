@@ -79,10 +79,7 @@ func setup(ctx context.Context, state desired.State, retry *bootstrap.Config, lo
 	if err := handle.SetSocketTimeout(5 * time.Second); err != nil {
 		return fmt.Errorf("configure netlink socket timeout: %w", err)
 	}
-	reconciler := netreconcile.NewReconciler(handle, netreconcile.NewProcSysctl())
-	runner, err := bootstrap.NewRunner(state, reconciler, retry, log)
-	if err != nil {
-		return err
-	}
+	reconciler := netreconcile.NewReconciler(handle, netreconcile.ProcSysctl{})
+	runner := bootstrap.NewRunner(state, reconciler, *retry, log)
 	return runner.Run(ctx)
 }

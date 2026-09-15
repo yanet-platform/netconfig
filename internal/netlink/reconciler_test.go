@@ -24,15 +24,13 @@ import (
 
 // fakeBackend models persistent interface state and injectable kernel failures.
 type fakeBackend struct {
-	Links          map[string]vnetlink.Link
-	Addresses      map[string][]vnetlink.Addr
-	Settings       map[string]string
-	Failures       map[string]error
-	Operations     []string
-	BeforeLookup   func(string)
-	BeforeAddrList func(string)
-	BeforeSysctl   func(string, string)
-	NextIndex      int
+	Links        map[string]vnetlink.Link
+	Addresses    map[string][]vnetlink.Addr
+	Settings     map[string]string
+	Failures     map[string]error
+	Operations   []string
+	BeforeSysctl func(string, string)
+	NextIndex    int
 }
 
 // newFakeBackend creates an empty namespace with stateful IPv6 configuration.
@@ -52,17 +50,6 @@ func (m *fakeBackend) LinkList() ([]vnetlink.Link, error) {
 		return links[first].Attrs().Name < links[second].Attrs().Name
 	})
 	return links, m.Failures["links"]
-}
-
-func (m *fakeBackend) LinkByName(name string) (vnetlink.Link, error) {
-	if m.BeforeLookup != nil {
-		m.BeforeLookup(name)
-	}
-	link, present := m.Links[name]
-	if !present {
-		return nil, fmt.Errorf("missing link %q", name)
-	}
-	return link, nil
 }
 
 func (m *fakeBackend) LinkAdd(link vnetlink.Link) error {
@@ -145,9 +132,6 @@ func (m *fakeBackend) LinkSetUp(link vnetlink.Link) error {
 
 func (m *fakeBackend) AddrList(link vnetlink.Link, family int) ([]vnetlink.Addr, error) {
 	name := link.Attrs().Name
-	if m.BeforeAddrList != nil {
-		m.BeforeAddrList(name)
-	}
 	addresses := []vnetlink.Addr{}
 	for _, address := range m.Addresses[name] {
 		if family == vnetlink.FAMILY_ALL || family == vnetlink.FAMILY_V6 && address.IP.To4() == nil {
@@ -198,7 +182,6 @@ func Test_Reconciler_RejectsNonEthernetKNI(t *testing.T) {
 		link vnetlink.Link
 	}{
 		{name: "TUN interface", link: &vnetlink.Tuntap{LinkAttrs: baseLink("kni0", 1).LinkAttrs, Mode: vnetlink.TUNTAP_MODE_TUN}},
-		{name: "unknown tuntap mode", link: &vnetlink.Tuntap{LinkAttrs: baseLink("kni0", 1).LinkAttrs}},
 		{name: "veth interface", link: &vnetlink.Veth{LinkAttrs: baseLink("kni0", 1).LinkAttrs}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -333,28 +316,11 @@ func Test_Reconciler_AutomaticLinkLocalReadiness(t *testing.T) {
 	}
 }
 
-// Test_Reconciler_CancellationDuringLookup verifies that cancellation at the
-// final identity lookup prevents the next otherwise necessary MTU mutation.
-func Test_Reconciler_CancellationDuringLookup(t *testing.T) {
-	backend := newFakeBackend()
-	backend.Links["kni0"] = baseLink("kni0", 1)
-	ctx, cancel := context.WithCancel(t.Context())
-	defer cancel()
-	backend.BeforeLookup = func(string) { cancel() }
-	state := desired.State{Links: []desired.Link{{Name: "kni0", MTU: 9000}}}
-	require.ErrorIs(t, netreconcile.NewReconciler(backend, backend).Configure(ctx, state), context.Canceled)
-	require.Equal(t, 1500, backend.Links["kni0"].Attrs().MTU)
-	require.Empty(t, backend.Operations)
-}
-
-func (m *fakeBackend) SetIPv6(ctx context.Context, name, setting, value string, validate func() error) error {
+func (m *fakeBackend) SetIPv6(ctx context.Context, name, setting, value string) error {
 	if m.BeforeSysctl != nil {
 		m.BeforeSysctl(name, setting)
 	}
 	if err := ctx.Err(); err != nil {
-		return err
-	}
-	if err := validate(); err != nil {
 		return err
 	}
 	if err := m.Failures["sysctl:"+name]; err != nil {
@@ -536,10 +502,9 @@ func Test_Reconciler_PartialFailureRetry(t *testing.T) {
 	require.Len(t, backend.Addresses["kni0"], 2)
 }
 
-// Test_Reconciler_RejectsIncompleteOrReplacedState verifies that invalid dumps,
-// identity changes and cancellation never authorize address cleanup.
-func Test_Reconciler_RejectsIncompleteOrReplacedState(t *testing.T) {
-	for _, failure := range []string{"late KNI", "wrong KNI type", "IPv6 prefix conflict", "link dump", "address dump", "replacement", "cancelled"} {
+// Failed dumps, incompatible existing links and cancellation prevent cleanup.
+func Test_Reconciler_FailurePreservesAddresses(t *testing.T) {
+	for _, failure := range []string{"late KNI", "wrong KNI type", "IPv6 prefix conflict", "link dump", "address dump", "cancelled"} {
 		t.Run(failure, func(t *testing.T) {
 			backend := newFakeBackend()
 			backend.Links["kni0"] = baseLink("kni0", 1)
@@ -558,8 +523,6 @@ func Test_Reconciler_RejectsIncompleteOrReplacedState(t *testing.T) {
 				backend.Failures["links"] = vnetlink.ErrDumpInterrupted
 			case "address dump":
 				backend.Failures["addresses:kni0"] = vnetlink.ErrDumpInterrupted
-			case "replacement":
-				backend.BeforeSysctl = func(string, string) { backend.Links["kni0"] = baseLink("kni0", 2) }
 			case "cancelled":
 				cancel()
 			}

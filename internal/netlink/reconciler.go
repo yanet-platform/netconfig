@@ -20,7 +20,6 @@ import (
 // Backend permits interface setup and narrowly scoped IPv6LL cleanup.
 type Backend interface {
 	LinkList() ([]vnetlink.Link, error)
-	LinkByName(string) (vnetlink.Link, error)
 	LinkAdd(vnetlink.Link) error
 	LinkSetMTU(vnetlink.Link, int) error
 	LinkSetUp(vnetlink.Link) error
@@ -29,14 +28,16 @@ type Backend interface {
 	AddrDel(vnetlink.Link, *vnetlink.Addr) error
 }
 
-// Sysctl writes a per-interface setting after validating its open descriptor.
+// Sysctl writes a per-interface IPv6 setting.
 type Sysctl interface {
-	SetIPv6(context.Context, string, string, string, func() error) error
+	SetIPv6(context.Context, string, string, string) error
 }
 
 // Reconciler separates interface creation from configuration during bootstrap.
 //
 // One worker retries these operations until success, then stops calling them.
+// Create and Configure consume state already validated by the input loader.
+// Netconfig is the only configurator; links are not replaced during a pass.
 type Reconciler struct {
 	backend Backend
 	sysctl  Sysctl
@@ -47,14 +48,8 @@ func NewReconciler(backend Backend, sysctl Sysctl) *Reconciler {
 	return &Reconciler{backend: backend, sysctl: sysctl}
 }
 
-func (m *Reconciler) readLinks(ctx context.Context, state desired.State) (map[string]vnetlink.Link, error) {
+func (m *Reconciler) readLinks(ctx context.Context) (map[string]vnetlink.Link, error) {
 	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	if m.backend == nil {
-		return nil, errors.New("interface setup: netlink backend is nil")
-	}
-	if err := state.Validate(); err != nil {
 		return nil, err
 	}
 	links, err := m.backend.LinkList()
@@ -63,14 +58,7 @@ func (m *Reconciler) readLinks(ctx context.Context, state desired.State) (map[st
 	}
 	existing := map[string]vnetlink.Link{}
 	for _, link := range links {
-		identity, err := IdentifyLink(link)
-		if err != nil {
-			return nil, err
-		}
-		if _, duplicate := existing[identity.Name]; duplicate {
-			return nil, fmt.Errorf("duplicate link %q in dump", identity.Name)
-		}
-		existing[identity.Name] = link
+		existing[link.Attrs().Name] = link
 	}
 	return existing, nil
 }
@@ -80,7 +68,7 @@ func (m *Reconciler) readLinks(ctx context.Context, state desired.State) (map[st
 // KNI and loopback must be supplied by the kernel/dataplane. A VLAN whose MTU
 // exceeds its observed parent waits for parent configuration on a later retry.
 func (m *Reconciler) Create(ctx context.Context, state desired.State) error {
-	existing, err := m.readLinks(ctx, state)
+	existing, err := m.readLinks(ctx)
 	if err != nil {
 		return err
 	}
@@ -97,7 +85,7 @@ func (m *Reconciler) createLink(ctx context.Context, wanted desired.Link, state 
 	}
 	parent := existing[wanted.Parent]
 	if link := existing[wanted.Name]; link != nil {
-		return ValidateLink(wanted, link, parent)
+		return validateLink(wanted, link, parent)
 	}
 	if wanted.Kind == desired.LinkKindKNI || wanted.Kind == desired.LinkKindLoopback {
 		return fmt.Errorf("kernel link %q is not available yet", wanted.Name)
@@ -105,14 +93,8 @@ func (m *Reconciler) createLink(ctx context.Context, wanted desired.Link, state 
 	attributes := vnetlink.LinkAttrs{Name: wanted.Name, MTU: wanted.MTU}
 	var created vnetlink.Link = &vnetlink.Dummy{LinkAttrs: attributes}
 	if wanted.Kind == desired.LinkKindVLAN {
-		if err := ValidateLink(desired.Link{Name: wanted.Parent}, parent, nil); err != nil {
+		if err := validateLink(desired.Link{Name: wanted.Parent}, parent, nil); err != nil {
 			return fmt.Errorf("create VLAN %q: parent %q: %w", wanted.Name, wanted.Parent, err)
-		}
-		identity, _ := IdentifyLink(parent)
-		var err error
-		parent, err = m.resolve(ctx, identity)
-		if err != nil {
-			return err
 		}
 		attributes.ParentIndex = parent.Attrs().Index
 		if attributes.MTU == 0 {
@@ -139,18 +121,15 @@ func (m *Reconciler) createLink(ctx context.Context, wanted desired.Link, state 
 // MTU increases precede child changes; parent decreases follow them and refuse
 // to clamp any remaining oversized child. Partial setup is safe to retry.
 func (m *Reconciler) Configure(ctx context.Context, state desired.State) error {
-	existing, err := m.readLinks(ctx, state)
+	existing, err := m.readLinks(ctx)
 	if err != nil {
 		return err
 	}
-	if m.sysctl == nil {
-		return errors.New("configure interfaces: sysctl backend is nil")
-	}
-	identities := map[string]LinkIdentity{}
+	available := map[string]vnetlink.Link{}
 	var failures error
 	for _, wanted := range state.Links {
 		link := existing[wanted.Name]
-		if err := ValidateLink(wanted, link, existing[wanted.Parent]); err != nil {
+		if err := validateLink(wanted, link, existing[wanted.Parent]); err != nil {
 			failures = errors.Join(failures, fmt.Errorf("configure link %q: %w", wanted.Name, err))
 			continue
 		}
@@ -158,7 +137,7 @@ func (m *Reconciler) Configure(ctx context.Context, state desired.State) error {
 			failures = errors.Join(failures, err)
 			continue
 		}
-		identities[wanted.Name], _ = IdentifyLink(link)
+		available[wanted.Name] = link
 	}
 	configurationOrder := slices.Clone(state.Links)
 	slices.SortStableFunc(configurationOrder, func(left, right desired.Link) int {
@@ -172,22 +151,23 @@ func (m *Reconciler) Configure(ctx context.Context, state desired.State) error {
 		return -1
 	})
 	for _, wanted := range configurationOrder {
-		if _, present := identities[wanted.Name]; !present {
+		link := available[wanted.Name]
+		if link == nil || wanted.Parent != "" && available[wanted.Parent] == nil {
 			continue
 		}
 		if wanted.Kind != desired.LinkKindKNI || existing[wanted.Name].Attrs().MTU < wanted.MTU {
-			if err := m.ensureMTU(ctx, wanted, identities); err != nil {
+			if err := m.ensureMTU(ctx, wanted, existing); err != nil {
 				failures = errors.Join(failures, err)
 				continue
 			}
 		}
-		if err := m.configureLink(ctx, wanted, identities); err != nil {
+		if err := m.configureLink(ctx, wanted, link); err != nil {
 			failures = errors.Join(failures, fmt.Errorf("configure link %q: %w", wanted.Name, err))
 		}
 	}
 	for _, wanted := range state.Links {
-		if _, present := identities[wanted.Name]; present && wanted.Kind == desired.LinkKindKNI {
-			failures = errors.Join(failures, m.ensureMTU(ctx, wanted, identities))
+		if available[wanted.Name] != nil && wanted.Kind == desired.LinkKindKNI {
+			failures = errors.Join(failures, m.ensureMTU(ctx, wanted, existing))
 		}
 	}
 	return failures
@@ -215,79 +195,34 @@ func validateEffectiveMTU(wanted desired.Link, state desired.State, existing map
 	return nil
 }
 
-func (m *Reconciler) resolve(ctx context.Context, expected LinkIdentity) (vnetlink.Link, error) {
+func (m *Reconciler) ensureMTU(ctx context.Context, wanted desired.Link, existing map[string]vnetlink.Link) error {
 	if err := ctx.Err(); err != nil {
-		return nil, err
+		return err
 	}
-	link, err := m.backend.LinkByName(expected.Name)
-	if err != nil {
-		return nil, fmt.Errorf("revalidate link %q: %w", expected.Name, err)
-	}
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	current, err := IdentifyLink(link)
-	if err != nil {
-		return nil, err
-	}
-	if current != expected {
-		return nil, fmt.Errorf("link %q changed identity during setup", expected.Name)
-	}
-	return link, nil
-}
-
-func (m *Reconciler) resolveConfigured(
-	ctx context.Context, wanted desired.Link, identities map[string]LinkIdentity,
-) (vnetlink.Link, error) {
-	if wanted.Parent != "" {
-		if _, err := m.resolve(ctx, identities[wanted.Parent]); err != nil {
-			return nil, err
-		}
-	}
-	return m.resolve(ctx, identities[wanted.Name])
-}
-
-func (m *Reconciler) ensureMTU(ctx context.Context, wanted desired.Link, identities map[string]LinkIdentity) error {
 	if wanted.MTU == 0 {
 		return nil
 	}
-	link, err := m.resolveConfigured(ctx, wanted, identities)
-	if err != nil {
-		return err
-	}
+	link := existing[wanted.Name]
 	if link.Attrs().MTU == wanted.MTU {
 		return nil
 	}
 	if wanted.Kind == desired.LinkKindKNI && link.Attrs().MTU > wanted.MTU {
-		links, err := m.backend.LinkList()
-		if err != nil {
-			return err
-		}
-		for _, child := range links {
-			if child == nil || child.Attrs() == nil {
-				return errors.New("incomplete child link dump")
-			}
+		for _, child := range existing {
 			// A veth link index names its peer, not an MTU-dependent child.
 			if child.Type() != "veth" && child.Attrs().ParentIndex == link.Attrs().Index && child.Attrs().MTU > wanted.MTU {
 				return fmt.Errorf("child %q exceeds desired parent MTU", child.Attrs().Name)
 			}
 		}
-		link, err = m.resolveConfigured(ctx, wanted, identities)
-		if err != nil {
-			return err
-		}
 	}
 	if err := m.backend.LinkSetMTU(link, wanted.MTU); err != nil {
 		return fmt.Errorf("set MTU on %q: %w", wanted.Name, err)
 	}
+	// Keep this pass's snapshot in sync for the later parent-decrease check.
+	link.Attrs().MTU = wanted.MTU
 	return nil
 }
 
-func (m *Reconciler) configureLink(ctx context.Context, wanted desired.Link, identities map[string]LinkIdentity) error {
-	validate := func() error {
-		_, err := m.resolveConfigured(ctx, wanted, identities)
-		return err
-	}
+func (m *Reconciler) configureLink(ctx context.Context, wanted desired.Link, link vnetlink.Link) error {
 	settings := []struct{ Name, Value string }{{"addr_gen_mode", "1"}}
 	if wanted.IPv6LinkLocal {
 		settings[0].Value = "0"
@@ -302,12 +237,11 @@ func (m *Reconciler) configureLink(ctx context.Context, wanted desired.Link, ide
 	}
 	settings = append(settings, struct{ Name, Value string }{"disable_ipv6", "0"})
 	for _, setting := range settings {
-		if err := m.sysctl.SetIPv6(ctx, wanted.Name, setting.Name, setting.Value, validate); err != nil {
+		if err := m.sysctl.SetIPv6(ctx, wanted.Name, setting.Name, setting.Value); err != nil {
 			return err
 		}
 	}
-	link, err := m.resolveConfigured(ctx, wanted, identities)
-	if err != nil {
+	if err := ctx.Err(); err != nil {
 		return err
 	}
 	if link.Attrs().Flags&net.FlagUp == 0 {
@@ -320,9 +254,12 @@ func (m *Reconciler) configureLink(ctx context.Context, wanted desired.Link, ide
 		return fmt.Errorf("list addresses: %w", err)
 	}
 	for _, desired := range wanted.Addresses {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		present := false
 		for _, address := range addresses {
-			if address.IPNet == nil || !address.IP.Equal(desired.Addr().AsSlice()) {
+			if !address.IP.Equal(desired.Addr().AsSlice()) {
 				continue
 			}
 			bits, _ := address.Mask.Size()
@@ -330,10 +267,6 @@ func (m *Reconciler) configureLink(ctx context.Context, wanted desired.Link, ide
 				return fmt.Errorf("IPv6 address %s has incompatible prefix length %d", desired.Addr(), bits)
 			}
 			if desired.Addr().Is6() && address.Flags&unix.IFA_F_DADFAILED != 0 {
-				link, err = m.resolveConfigured(ctx, wanted, identities)
-				if err != nil {
-					return err
-				}
 				if err := m.backend.AddrDel(link, &address); err != nil {
 					return fmt.Errorf("remove failed-DAD address %s: %w", desired, err)
 				}
@@ -347,10 +280,6 @@ func (m *Reconciler) configureLink(ctx context.Context, wanted desired.Link, ide
 		if present {
 			continue
 		}
-		link, err = m.resolveConfigured(ctx, wanted, identities)
-		if err != nil {
-			return err
-		}
 		address := vnetlink.Addr{IPNet: &net.IPNet{
 			IP: desired.Addr().AsSlice(), Mask: net.CIDRMask(desired.Bits(), desired.Addr().BitLen()),
 		}}
@@ -358,23 +287,16 @@ func (m *Reconciler) configureLink(ctx context.Context, wanted desired.Link, ide
 			return fmt.Errorf("ensure address %s: %w", desired, err)
 		}
 	}
-	link, err = m.resolveConfigured(ctx, wanted, identities)
-	if err != nil {
-		return err
-	}
 	addresses, err = m.backend.AddrList(link, vnetlink.FAMILY_V6)
 	if err != nil {
 		return fmt.Errorf("check IPv6 address readiness: %w", err)
 	}
 	linkLocalReady := false
 	for _, address := range addresses {
-		if address.IPNet == nil {
-			continue
-		}
 		ready := address.Flags&(unix.IFA_F_DADFAILED|unix.IFA_F_TENTATIVE|unix.IFA_F_DEPRECATED) == 0
 		linkLocalReady = linkLocalReady || address.IP.IsLinkLocalUnicast() && ready
 		if !ready && slices.ContainsFunc(wanted.Addresses, func(prefix netip.Prefix) bool {
-			return prefix.Addr().Is6() && address.IP.Equal(prefix.Addr().AsSlice())
+			return address.IP.Equal(prefix.Addr().AsSlice())
 		}) {
 			return fmt.Errorf("desired IPv6 address %s has not completed duplicate address detection", address.IP)
 		}
@@ -383,14 +305,14 @@ func (m *Reconciler) configureLink(ctx context.Context, wanted desired.Link, ide
 		return errors.New("IPv6 link-local address is not ready; waiting for carrier and duplicate address detection")
 	}
 	if wanted.Kind != desired.LinkKindLoopback && !wanted.IPv6LinkLocal {
-		return m.removeUnlistedIPv6LL(ctx, wanted, identities, addresses)
+		return m.removeUnlistedIPv6LL(ctx, wanted, link, addresses)
 	}
-	return validate()
+	return ctx.Err()
 }
 
-func (m *Reconciler) removeUnlistedIPv6LL(ctx context.Context, wanted desired.Link, identities map[string]LinkIdentity, addresses []vnetlink.Addr) error {
+func (m *Reconciler) removeUnlistedIPv6LL(ctx context.Context, wanted desired.Link, link vnetlink.Link, addresses []vnetlink.Addr) error {
 	for _, address := range addresses {
-		if address.IPNet == nil || address.IP.To4() != nil || !address.IP.IsLinkLocalUnicast() {
+		if !address.IP.IsLinkLocalUnicast() {
 			continue
 		}
 		if slices.ContainsFunc(wanted.Addresses, func(prefix netip.Prefix) bool {
@@ -398,16 +320,14 @@ func (m *Reconciler) removeUnlistedIPv6LL(ctx context.Context, wanted desired.Li
 		}) {
 			continue
 		}
-		link, err := m.resolveConfigured(ctx, wanted, identities)
-		if err != nil {
+		if err := ctx.Err(); err != nil {
 			return err
 		}
 		if err := m.backend.AddrDel(link, &address); err != nil {
 			return fmt.Errorf("remove unlisted IPv6 link-local address: %w", err)
 		}
 	}
-	_, err := m.resolveConfigured(ctx, wanted, identities)
-	return err
+	return ctx.Err()
 }
 
 var _ Backend = (*vnetlink.Handle)(nil)

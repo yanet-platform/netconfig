@@ -3,10 +3,7 @@
 
 package desired
 
-import (
-	"net/netip"
-	"slices"
-)
+import "net/netip"
 
 // LinkKind distinguishes kernel-owned links from created interfaces.
 type LinkKind int
@@ -21,19 +18,6 @@ const (
 // State is the startup configuration, ordered lexicographically by link name.
 type State struct {
 	Links []Link
-}
-
-// Clone detaches every mutable part of the desired configuration.
-func (m State) Clone() State {
-	links := slices.Clone(m.Links)
-	for idx := range links {
-		links[idx].Addresses = slices.Clone(links[idx].Addresses)
-		if links[idx].AcceptRA != nil {
-			value := *links[idx].AcceptRA
-			links[idx].AcceptRA = &value
-		}
-	}
-	return State{Links: links}
 }
 
 // Link describes an explicitly managed interface.

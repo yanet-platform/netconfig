@@ -13,7 +13,7 @@ import (
 	"github.com/yanet-platform/netconfig/internal/desired"
 )
 
-// Load returns a validated state that owns all of its mutable configuration.
+// Load normalizes and validates previously parsed startup configuration.
 func (m *Config) Load() (desired.State, error) {
 	state := desired.State{}
 	for _, section := range []struct {
@@ -26,12 +26,9 @@ func (m *Config) Load() (desired.State, error) {
 	} {
 		for _, name := range slices.Sorted(maps.Keys(section.Links)) {
 			config := section.Links[name]
-			if err := validateLinkConfig(config, section.Kind == desired.LinkKindVLAN); err != nil {
-				return desired.State{}, fmt.Errorf("native link %q: %w", name, err)
-			}
 			link := desired.Link{
 				Name: name, Kind: section.Kind, Parent: config.Link,
-				MTU: config.MTU, IPv6LinkLocal: true,
+				MTU: config.MTU, IPv6LinkLocal: true, AcceptRA: config.AcceptRA,
 			}
 			if section.Kind == desired.LinkKindKNI && name == "lo" {
 				link.Kind = desired.LinkKindLoopback
@@ -41,10 +38,6 @@ func (m *Config) Load() (desired.State, error) {
 			}
 			if config.LinkLocal != nil {
 				link.IPv6LinkLocal = len(*config.LinkLocal) != 0
-			}
-			if config.AcceptRA != nil {
-				value := *config.AcceptRA
-				link.AcceptRA = &value
 			}
 			for _, address := range config.Addresses {
 				prefix, err := netip.ParsePrefix(address)

@@ -30,12 +30,30 @@ DPDK, a gateway, the neighbour API, Netplan executables or a service manager.
 - There is no continuous drift repair. Restart netconfig to apply a new config or
   restore a managed interface deleted after successful bootstrap.
 
-Netconfig is the only **interface configurator** in its network namespace.
-Concurrent address/MTU changes by another configurator are unsupported. Dataplane
-creation of KNI is expected. Routing and neighbour discovery belong to separate
-processes: netconfig does not program Linux routes/neighbours or start DHCP clients.
-Kernel connected/local/RA routes and ordinary ARP/NDP are normal side effects of
-interface configuration.
+### Execution contract
+
+- Netconfig is the **only interface configurator in its network namespace**:
+  one worker owns interface creation, addresses, MTU, administrative state and
+  per-interface IPv6 sysctls. Do not run another netconfig instance, Netplan apply,
+  networkd, NetworkManager or another interface configurator in that namespace.
+- The dataplane supplies KNI, possibly after startup. During bootstrap it and other
+  processes must not delete, rename or recreate observed managed links, or change
+  their addresses, MTU or IPv6 policy. Each creation/configuration phase uses one
+  kernel link snapshot; configuration updates it with its own MTU changes. There
+  is no per-operation identity revalidation or defence against concurrent replacement.
+- Carrier changes, IPv6 DAD, automatic IPv6LL and kernel RA processing are normal
+  asynchronous events. Bootstrap still waits for required IPv6 readiness and
+  retries kernel errors. A failed pass retains partial progress.
+- Input shape, retry bounds and topology are validated during configuration
+  loading, before acquiring kernel resources. The worker owns that startup state;
+  internal helpers consume it without repeated validation or defensive deep copies.
+- Existing state from an earlier run is supported: compatible links are reused,
+  incompatible link types/VLAN identities are rejected and unowned addresses are
+  preserved, except the documented cleanup of unlisted IPv6LL.
+
+Routing and neighbour discovery belong to separate processes: netconfig does not
+program Linux routes/neighbours or start DHCP clients. Kernel connected/local/RA
+routes and ordinary ARP/NDP are normal side effects of interface configuration.
 
 ## Configuration
 
@@ -123,7 +141,7 @@ the documented subset, not an implementation of all Netplan features.
 
 ## Build and run
 
-Build with Go 1.24.13 or newer on Linux; CI and container builds use Go 1.26.2:
+Build with Go 1.27.1 or newer on Linux; CI and container builds use Go 1.27.1:
 
 ```bash
 go build -trimpath -o build/netconfig ./cmd/netconfig
@@ -196,7 +214,7 @@ builds the executable and sets `NETCONFIG_BINARY` so subprocess tests exercise t
 real CLI; without that variable they explicitly skip. Kernel cases additionally
 require `NETCONFIG_NETNS_TESTS=1` and run serially across packages.
 
-Coverage includes strict parsing, address-family validation, replacement identity,
+Coverage includes strict parsing, address-family validation, restart compatibility,
 MTU ordering, IPv6LL/DAD, delayed KNI, partial progress, cancellation, immutable
 input during retries, preservation of foreign addresses, SIGTERM without teardown,
 restart reconciliation, permanent static lifetimes and automatic link-local readiness.

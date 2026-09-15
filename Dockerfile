@@ -2,7 +2,7 @@
 # Copyright 2026 YANDEX LLC
 # SPDX-License-Identifier: Apache-2.0
 
-FROM golang:1.26.2 AS test
+FROM golang:1.27.1 AS test
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
@@ -11,7 +11,7 @@ RUN go build -trimpath -o /tmp/netconfig ./cmd/netconfig
 ENV NETCONFIG_BINARY=/tmp/netconfig
 CMD ["go", "test", "-race", "-count=1", "./..."]
 
-FROM --platform=$BUILDPLATFORM golang:1.26.2-alpine3.23 AS build
+FROM --platform=$BUILDPLATFORM golang:1.27.1-alpine3.23 AS build
 ARG TARGETOS
 ARG TARGETARCH
 WORKDIR /src

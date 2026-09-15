@@ -9,7 +9,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
-	"gopkg.in/yaml.v3"
+	"go.yaml.in/yaml/v3"
 
 	"github.com/yanet-platform/netconfig/internal/desired"
 	"github.com/yanet-platform/netconfig/internal/native"
@@ -30,24 +30,6 @@ func Test_Config_LoadFixture(t *testing.T) {
 			Addresses: []netip.Prefix{netip.MustParsePrefix("192.0.2.2/24"), netip.MustParsePrefix("2001:db8:100::2/64")}},
 		{Name: "lo", Kind: desired.LinkKindLoopback, IPv6LinkLocal: true, Addresses: []netip.Prefix{netip.MustParsePrefix("2001:db8::1/128")}},
 	}}, state)
-}
-
-func Test_Config_LoadOwnership(t *testing.T) {
-	var config native.Config
-	require.NoError(t, yaml.Unmarshal([]byte("ethernets: {kni0: {accept-ra: false, addresses: ['192.0.2.7/24'], link-local: [ipv6]}}"), &config))
-	first, err := config.Load()
-	require.NoError(t, err)
-	second, err := config.Load()
-	require.NoError(t, err)
-	second.Links[0].Addresses[0] = netip.MustParsePrefix("2001:db8::2/64")
-	*second.Links[0].AcceptRA = true
-	link := config.Ethernets["kni0"]
-	link.Addresses[0] = "198.51.100.2/32"
-	*link.AcceptRA = true
-	*link.LinkLocal = nil
-	require.Equal(t, "192.0.2.7/24", first.Links[0].Addresses[0].String())
-	require.False(t, *first.Links[0].AcceptRA)
-	require.True(t, first.Links[0].IPv6LinkLocal)
 }
 
 func Test_Config_LoadDefaults(t *testing.T) {

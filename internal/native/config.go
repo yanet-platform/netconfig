@@ -10,7 +10,7 @@ import (
 	"slices"
 	"strconv"
 
-	"gopkg.in/yaml.v3"
+	"go.yaml.in/yaml/v3"
 )
 
 // Config contains only the interface subset configured at startup.
@@ -72,7 +72,7 @@ func (m *Config) UnmarshalYAML(node *yaml.Node) error {
 }
 
 func validateMapping(node *yaml.Node) error {
-	if node.Kind != yaml.MappingNode || node.Tag != "!!map" || len(node.Content)%2 != 0 {
+	if node.Kind != yaml.MappingNode || node.Tag != "!!map" {
 		return errors.New("configuration mapping is required")
 	}
 	keys := map[string]bool{}
@@ -156,8 +156,6 @@ func validateLinkConfig(config LinkConfig, vlan bool) error {
 		if config.ID == nil || config.Link == "" {
 			return errors.New("VLAN id and parent link are required")
 		}
-	} else if config.ID != nil || config.Link != "" {
-		return errors.New("id and link are only supported for VLANs")
 	}
 	if config.LinkLocal != nil {
 		families := *config.LinkLocal

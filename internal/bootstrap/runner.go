@@ -6,7 +6,6 @@ package bootstrap
 import (
 	"context"
 	"errors"
-	"fmt"
 	"time"
 
 	"go.uber.org/zap"
@@ -18,14 +17,6 @@ import (
 type Config struct {
 	InitialBackoff time.Duration `yaml:"initial_backoff"`
 	MaxBackoff     time.Duration `yaml:"max_backoff"`
-}
-
-// Validate rejects delays that could spin or overflow the retry schedule.
-func (m *Config) Validate() error {
-	if m == nil || m.InitialBackoff <= 0 || m.MaxBackoff < m.InitialBackoff {
-		return errors.New("retry requires 0 < initial_backoff <= max_backoff")
-	}
-	return nil
 }
 
 // Reconciler permits partial setup while other configured links are missing.
@@ -42,21 +33,9 @@ type Runner struct {
 	log        *zap.Logger
 }
 
-// NewRunner validates and detaches configuration before the first setup pass.
-func NewRunner(state desired.State, reconciler Reconciler, config *Config, log *zap.Logger) (*Runner, error) {
-	if err := state.Validate(); err != nil {
-		return nil, fmt.Errorf("startup configuration: %w", err)
-	}
-	if err := config.Validate(); err != nil {
-		return nil, err
-	}
-	if reconciler == nil {
-		return nil, errors.New("bootstrap reconciler is nil")
-	}
-	if log == nil {
-		log = zap.NewNop()
-	}
-	return &Runner{state: state.Clone(), reconciler: reconciler, config: *config, log: log}, nil
+// NewRunner takes ownership of state and retry policy validated by config loading.
+func NewRunner(state desired.State, reconciler Reconciler, config Config, log *zap.Logger) *Runner {
+	return &Runner{state: state, reconciler: reconciler, config: config, log: log}
 }
 
 // Run retries both setup phases until success or cancellation without rollback.
