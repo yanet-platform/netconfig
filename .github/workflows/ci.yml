@@ -1,0 +1,39 @@
+# Copyright 2026 YANDEX LLC
+# SPDX-License-Identifier: Apache-2.0
+
+name: CI
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build test environment
+        run: docker build --target test -t netconfig-test .
+      - name: Formatting and vet
+        run: >-
+          docker run --rm netconfig-test sh -c
+          'test -z "$(gofmt -l cmd internal)" && go vet ./...'
+      - name: Unit and race tests
+        run: docker run --rm netconfig-test
+      - name: Kernel integration in an isolated network namespace
+        run: >-
+          docker run --rm --privileged --network none
+          -e NETCONFIG_NETNS_TESTS=1 netconfig-test
+          go test -race -count=1 -p=1 ./...
+      - name: Build scratch runtime
+        run: docker build -t netconfig .
+      - name: Validate example without network privileges
+        run: >-
+          docker run --rm --network none --cap-drop ALL --read-only
+          --mount type=bind,src="$PWD/examples",dst=/config,readonly
+          netconfig -config /config/native.yaml -check
