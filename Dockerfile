@@ -22,7 +22,7 @@ COPY internal ./internal
 RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-amd64} \
     go build -trimpath -ldflags='-s -w' -o /out/netconfig ./cmd/netconfig
 
-FROM alpine:3.23 AS runtime
+FROM scratch AS runtime
 LABEL org.opencontainers.image.title="netconfig" \
       org.opencontainers.image.description="Startup interface configuration for YANET" \
       org.opencontainers.image.source="https://github.com/yanet-platform/netconfig" \

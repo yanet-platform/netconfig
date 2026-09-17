@@ -150,7 +150,8 @@ go build -trimpath -o build/netconfig ./cmd/netconfig
 ./build/netconfig -config examples/native.yaml -check
 ```
 
-The multi-stage image has an Alpine 3.23 runtime and a statically linked binary:
+The multi-stage image uses `scratch` for the runtime and contains only the
+statically linked binary and license notices. It needs no shell or OS packages:
 
 ```bash
 docker build -t netconfig:local .

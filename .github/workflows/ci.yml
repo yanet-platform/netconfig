@@ -30,7 +30,7 @@ jobs:
           docker run --rm --privileged --network none
           -e NETCONFIG_NETNS_TESTS=1 netconfig-test
           go test -race -count=1 -p=1 ./...
-      - name: Build Alpine runtime
+      - name: Build scratch runtime
         run: docker build -t netconfig .
       - name: Validate example without network privileges
         run: >-
